@@ -52,6 +52,13 @@
             text-decoration: line-through;
             color: #9ca3af;
         }
+        /* Active task styling in timeline */
+        .timeline-item.active {
+            background-color: #e0e7ff; /* Light blue/indigo background for active task */
+            border: 2px solid #6366f1; /* Indigo border */
+            box-shadow: 0 4px 15px rgba(99, 102, 241, 0.2);
+        }
+
         /* Enhanced button styling */
         .btn-primary {
             background-color: #6366f1; /* Tailwind indigo-500 equivalent */
@@ -119,7 +126,6 @@
 
         /* Login Page Specific Styles */
         #login-page {
-            /* Display is now managed by JS, but keep flex for centering when visible */
             display: flex; /* Initially hidden but with flex properties */
             justify-content: center;
             align-items: center;
@@ -323,6 +329,11 @@
         const loginBtn = document.getElementById('login-btn');
         const logoutBtn = document.getElementById('logout-btn');
         const authMessage = document.getElementById('auth-message');
+
+        // Timer variables
+        let activeTimerInterval = null;
+        let currentActiveTaskIndex = -1; // -1 means no task is active
+        let activeTimelineTasks = []; // Stores task data including DOM element reference for timer updates
         
         // --- Initial App Load ---
         document.addEventListener('DOMContentLoaded', initializeAppAndAuth);
@@ -374,11 +385,24 @@
                     if (tomorrowHwUnsubscribe) tomorrowHwUnsubscribe();
                     renderScheduleList([]); // Clear the displayed schedule
                     userIdDisplay.textContent = `Please log in.`;
+                    // Clear any active timers if user logs out
+                    if (activeTimerInterval) {
+                        clearInterval(activeTimerInterval);
+                        activeTimerInterval = null;
+                        currentActiveTaskIndex = -1;
+                        activeTimelineTasks.forEach(task => {
+                            if (task.element) {
+                                task.element.classList.remove('active');
+                                const timerSpan = task.element.querySelector('.countdown-timer');
+                                if (timerSpan) timerSpan.textContent = '';
+                            }
+                        });
+                    }
                 }
             });
 
-            // Initial UI state setup for the first load, before onAuthStateChanged might asynchronously fire.
-            // This ensures correct display immediately.
+            // Initial UI state setup for the first load.
+            // This ensures correct display immediately, then onAuthStateChanged refines it.
             if (auth.currentUser) {
                 showAppUI();
             } else {
@@ -436,7 +460,7 @@
             try {
                 await createUserWithEmailAndPassword(auth, email, password);
                 displayAuthMessage("Registration successful! You are now logged in.", false);
-                // The onAuthStateChanged listener will handle the UI update to showAppUI()
+                // The onAuthStateChanged listener will handle the UI update based on new user
             } catch (error) {
                 console.error("Registration error:", error);
                 if (error.code === 'auth/email-already-in-use') {
@@ -467,7 +491,7 @@
             try {
                 await signInWithEmailAndPassword(auth, email, password);
                 displayAuthMessage("Login successful!", false);
-                // The onAuthStateChanged listener will handle the UI update to showAppUI()
+                // The onAuthStateChanged listener will handle the UI update based on successful login
             } catch (error) {
                 console.error("Login error:", error);
                 if (error.code === 'auth/user-not-found' || error.code === 'auth/wrong-password') {
@@ -825,14 +849,15 @@
             currentTime.setHours(hours, minutes, 0, 0); 
 
             timelineOutput.innerHTML = '<h3 class="text-2xl font-bold text-gray-800 mb-4 border-b border-gray-200 pb-2">Your Timeline</h3>';
-            
+            activeTimelineTasks = []; // Clear previous tasks
+
             const taskItems = getCurrentScheduleTasks();
             if(taskItems.length === 0) {
                  timelineOutput.innerHTML += `<p class="text-gray-500">No tasks to schedule. Add some above!</p>`;
                  return;
             }
 
-            taskItems.forEach(task => {
+            taskItems.forEach((task, index) => {
                 const duration = task.time || 30; 
                 const startTimeStr = currentTime.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
                 const endTime = new Date(currentTime.getTime() + duration * 60000); 
@@ -844,13 +869,106 @@
                     <input type="checkbox" class="h-6 w-6 rounded-md border-gray-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer">
                     <span class="flex-grow font-medium text-indigo-800 text-lg">${task.text}</span>
                     <strong class="font-semibold text-indigo-900 text-md">${startTimeStr} - ${endTimeStr}</strong>
+                    <span class="countdown-timer font-bold text-lg text-red-600 ml-4"></span>
                 `;
                 timelineOutput.appendChild(timelineItem);
                 
+                // Store relevant data for timer management
+                activeTimelineTasks.push({
+                    index: index,
+                    text: task.text,
+                    element: timelineItem,
+                    endTime: endTime,
+                    completed: false
+                });
+
                 currentTime = endTime; 
             });
             
             saveSchedule(getCurrentScheduleTasks(), startTimeValue);
+            startNextAvailableTimer(); // Start the timer for the first task
+        }
+
+        /**
+         * Finds the next incomplete task and starts its timer.
+         */
+        function startNextAvailableTimer() {
+            if (activeTimerInterval) {
+                clearInterval(activeTimerInterval);
+                activeTimerInterval = null;
+            }
+            // Remove 'active' class from previously active task
+            if (currentActiveTaskIndex !== -1 && activeTimelineTasks[currentActiveTaskIndex] && activeTimelineTasks[currentActiveTaskIndex].element) {
+                activeTimelineTasks[currentActiveTaskIndex].element.classList.remove('active');
+            }
+            currentActiveTaskIndex = -1; // Reset active task index
+
+            for (let i = 0; i < activeTimelineTasks.length; i++) {
+                if (!activeTimelineTasks[i].completed) {
+                    currentActiveTaskIndex = i;
+                    startTimer(i);
+                    // activeTimelineTasks[i].element.classList.add('active'); // Highlight active task - handled in startTimer
+                    return;
+                }
+            }
+            console.log("No more incomplete tasks to start timer for.");
+            // If all tasks are completed, clear all timers/highlight
+            activeTimelineTasks.forEach(task => {
+                if (task.element) {
+                    const timerSpan = task.element.querySelector('.countdown-timer');
+                    if (timerSpan) timerSpan.textContent = 'Done!';
+                }
+            });
+        }
+
+        /**
+         * Starts the countdown timer for a specific task.
+         * @param {number} taskIndex - The index of the task in activeTimelineTasks.
+         */
+        function startTimer(taskIndex) {
+            if (activeTimerInterval) {
+                clearInterval(activeTimerInterval);
+            }
+            // Remove 'active' class from any previous task that might still be highlighted
+            if (currentActiveTaskIndex !== -1 && activeTimelineTasks[currentActiveTaskIndex] && activeTimelineTasks[currentActiveTaskIndex].element) {
+                 activeTimelineTasks[currentActiveTaskIndex].element.classList.remove('active');
+            }
+            currentActiveTaskIndex = taskIndex; // Set the new active task
+
+            const task = activeTimelineTasks[taskIndex];
+            if (!task || !task.element) return;
+
+            task.element.classList.add('active'); // Highlight the new active task
+            const timerSpan = task.element.querySelector('.countdown-timer');
+            if (!timerSpan) return;
+
+            const updateTimer = () => {
+                const now = new Date().getTime();
+                const timeLeft = task.endTime.getTime() - now; // Time left in milliseconds
+
+                if (timeLeft <= 0) {
+                    clearInterval(activeTimerInterval);
+                    activeTimerInterval = null;
+                    timerSpan.textContent = "Time's up!";
+                    task.completed = true; // Mark as completed
+                    task.element.classList.add('completed'); // Add line-through style
+                    const checkbox = task.element.querySelector('input[type="checkbox"]');
+                    if (checkbox) checkbox.checked = true; // Check the box
+                    console.log(`Task "${task.text}" completed. Moving to next.`);
+                    startNextAvailableTimer(); // Move to the next task
+                    return;
+                }
+
+                // FIX: Calculate total minutes and seconds
+                const totalSeconds = Math.floor(timeLeft / 1000);
+                const minutes = Math.floor(totalSeconds / 60);
+                const seconds = totalSeconds % 60;
+
+                timerSpan.textContent = `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+            };
+
+            updateTimer(); // Initial call to display immediately
+            activeTimerInterval = setInterval(updateTimer, 1000); // Update every second
         }
 
         /**
@@ -877,14 +995,14 @@
             console.log("Event: Previous week button clicked.");
             currentMonday.setDate(currentMonday.getDate() - 7); 
             renderWeek();
-            setupTomorrowHomeworkListener(); 
+            // Don't setupTomorrowHomeworkListener here directly, it's called in onAuthStateChanged if needed
         });
 
         document.getElementById('next-week').addEventListener('click', () => {
             console.log("Event: Next week button clicked.");
             currentMonday.setDate(currentMonday.getDate() + 7); 
             renderWeek();
-            setupTomorrowHomeworkListener(); 
+            // Don't setupTomorrowHomeworkListener here directly, it's called in onAuthStateChanged if needed
         });
 
         // Homework input save
@@ -934,7 +1052,30 @@
         timelineOutput.addEventListener('change', (e) => {
             if (e.target.matches('input[type="checkbox"]')) {
                 console.log("Event: Timeline checkbox toggled.");
-                e.target.closest('.timeline-item').classList.toggle('completed', e.target.checked);
+                const checkbox = e.target;
+                const timelineItem = checkbox.closest('.timeline-item');
+                // Adjust index calculation to account for the H3 title if present, otherwise assume 0-indexed direct children
+                const taskIndex = Array.from(timelineOutput.children).filter(child => child.classList.contains('timeline-item')).indexOf(timelineItem); 
+
+                if (taskIndex >= 0 && taskIndex < activeTimelineTasks.length) {
+                    activeTimelineTasks[taskIndex].completed = checkbox.checked;
+                    timelineItem.classList.toggle('completed', checkbox.checked);
+                    
+                    // Stop current timer if it's the active task being completed
+                    if (checkbox.checked && currentActiveTaskIndex === taskIndex) {
+                         if (activeTimerInterval) {
+                            clearInterval(activeTimerInterval);
+                            activeTimerInterval = null;
+                         }
+                         if (timelineItem) timelineItem.classList.remove('active'); // Remove highlight immediately
+                         const timerSpan = timelineItem.querySelector('.countdown-timer');
+                         if (timerSpan) timerSpan.textContent = 'Done!'; // Indicate completion
+                         currentActiveTaskIndex = -1; // Reset active task index
+                    }
+
+                    // Always try to start the next available timer after a change
+                    startNextAvailableTimer(); 
+                }
             }
         });
 
