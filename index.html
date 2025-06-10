@@ -119,7 +119,8 @@
 
         /* Login Page Specific Styles */
         #login-page {
-            display: flex;
+            /* Display is now managed by JS, but keep flex for centering when visible */
+            display: flex; /* Initially hidden but with flex properties */
             justify-content: center;
             align-items: center;
             min-height: 100vh;
@@ -197,7 +198,7 @@
     </div>
 
     <!-- Main Homework Log Application Content -->
-    <div id="app-content" class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 hidden">
+    <div id="app-content" style="display: none;"> <!-- Explicitly hidden via inline style initially -->
         <header class="text-center mb-10 mt-4 flex justify-between items-center">
             <div class="flex-grow text-center">
                 <h1 class="text-5xl font-extrabold text-gray-800 mb-2">Advanced Homework Log</h1>
@@ -376,15 +377,15 @@
                 }
             });
 
-            // No need for initial UI state setting here, onAuthStateChanged will handle it.
-            // This block was potentially causing a flicker or a race condition.
-            // if (auth.currentUser) {
-            //     showAppUI();
-            // } else {
-            //     showLoginUI();
-            // }
+            // Initial UI state setup for the first load, before onAuthStateChanged might asynchronously fire.
+            // This ensures correct display immediately.
+            if (auth.currentUser) {
+                showAppUI();
+            } else {
+                showLoginUI();
+            }
 
-            // Initial rendering of calendar and tomorrow's schedule (may load empty if not logged in)
+            // Initial rendering of calendar and tomorrow's schedule (will be refreshed by listeners once data is ready)
             renderWeek();
             setupTomorrowHomeworkListener();
         }
@@ -392,15 +393,15 @@
         // --- UI State Management ---
         function showAppUI() {
             console.log("showAppUI: Showing app content.");
-            loginPage.classList.add('hidden');
-            appContent.classList.remove('hidden');
+            loginPage.style.display = 'none'; // Hide login page
+            appContent.style.display = 'block'; // Show app content (use 'block' for general divs)
             displayAuthMessage('', false); // Clear any auth messages
         }
 
         function showLoginUI() {
             console.log("showLoginUI: Showing login page.");
-            loginPage.classList.remove('hidden');
-            appContent.classList.add('hidden');
+            loginPage.style.display = 'flex'; // Show login page (keep 'flex' for centering)
+            appContent.style.display = 'none'; // Hide app content
             authUsernameInput.value = ''; 
             authPasswordInput.value = '';
         }
@@ -435,7 +436,7 @@
             try {
                 await createUserWithEmailAndPassword(auth, email, password);
                 displayAuthMessage("Registration successful! You are now logged in.", false);
-                // onAuthStateChanged will handle UI update based on new user
+                // The onAuthStateChanged listener will handle the UI update to showAppUI()
             } catch (error) {
                 console.error("Registration error:", error);
                 if (error.code === 'auth/email-already-in-use') {
@@ -466,7 +467,7 @@
             try {
                 await signInWithEmailAndPassword(auth, email, password);
                 displayAuthMessage("Login successful!", false);
-                // onAuthStateChanged will handle UI update based on successful login
+                // The onAuthStateChanged listener will handle the UI update to showAppUI()
             } catch (error) {
                 console.error("Login error:", error);
                 if (error.code === 'auth/user-not-found' || error.code === 'auth/wrong-password') {
@@ -482,7 +483,7 @@
             try {
                 await signOut(auth);
                 displayAuthMessage("Logged out successfully.", false);
-                // onAuthStateChanged will handle UI update
+                // The onAuthStateChanged listener will handle the UI update to showLoginUI()
             } catch (error) {
                 console.error("Logout error:", error);
                 displayAuthMessage(`Logout failed: ${error.message}`, true);
