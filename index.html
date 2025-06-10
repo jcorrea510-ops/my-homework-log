@@ -316,7 +316,7 @@
         // Login Page Elements
         const loginPage = document.getElementById('login-page');
         const appContent = document.getElementById('app-content');
-        const authUsernameInput = document.getElementById('auth-username'); // Changed from authEmailInput
+        const authUsernameInput = document.getElementById('auth-username'); 
         const authPasswordInput = document.getElementById('auth-password');
         const registerBtn = document.getElementById('register-btn');
         const loginBtn = document.getElementById('login-btn');
@@ -358,7 +358,7 @@
                                             ? user.email.split('@')[0] 
                                             : user.email || 'Anonymous';
                     userIdDisplay.textContent = `Logged in as: ${displayUsername} (ID: ${userId})`; 
-                    showAppUI();
+                    showAppUI(); // Explicitly show UI here
                     // Set up Firestore data listeners for the logged-in user
                     setupDataListeners(); 
                     setupTomorrowHomeworkListener();
@@ -366,7 +366,7 @@
                     // User is signed out.
                     userId = null;
                     isAuthReady = false;
-                    showLoginUI();
+                    showLoginUI(); // Explicitly show UI here
                     // Clear listeners and local data if no user is authenticated
                     if (homeworkUnsubscribe) homeworkUnsubscribe();
                     if (scheduleUnsubscribe) scheduleUnsubscribe();
@@ -376,12 +376,13 @@
                 }
             });
 
-            // Set up initial UI state based on current auth state (will be overridden by onAuthStateChanged)
-            if (auth.currentUser) {
-                showAppUI();
-            } else {
-                showLoginUI();
-            }
+            // No need for initial UI state setting here, onAuthStateChanged will handle it.
+            // This block was potentially causing a flicker or a race condition.
+            // if (auth.currentUser) {
+            //     showAppUI();
+            // } else {
+            //     showLoginUI();
+            // }
 
             // Initial rendering of calendar and tomorrow's schedule (may load empty if not logged in)
             renderWeek();
@@ -390,15 +391,17 @@
 
         // --- UI State Management ---
         function showAppUI() {
+            console.log("showAppUI: Showing app content.");
             loginPage.classList.add('hidden');
             appContent.classList.remove('hidden');
             displayAuthMessage('', false); // Clear any auth messages
         }
 
         function showLoginUI() {
+            console.log("showLoginUI: Showing login page.");
             loginPage.classList.remove('hidden');
             appContent.classList.add('hidden');
-            authUsernameInput.value = ''; // Changed from authEmailInput
+            authUsernameInput.value = ''; 
             authPasswordInput.value = '';
         }
 
@@ -416,24 +419,23 @@
         const DUMMY_DOMAIN = '@homeworklog.app'; // Define the dummy domain
 
         async function handleRegister() {
-            const username = authUsernameInput.value.trim(); // Get username
+            const username = authUsernameInput.value.trim(); 
             const password = authPasswordInput.value;
-            const email = username + DUMMY_DOMAIN; // Construct dummy email
+            const email = username + DUMMY_DOMAIN; 
 
             if (!username || !password) {
                 displayAuthMessage("Please enter both username and password.", true);
                 return;
             }
-            if (username.includes('@')) { // Prevent user from entering @ if we're adding dummy domain
+            if (username.includes('@')) { 
                 displayAuthMessage("Username cannot contain '@' symbol.", true);
                 return;
             }
 
             try {
-                // Creates a new user with email (dummy) and password
                 await createUserWithEmailAndPassword(auth, email, password);
                 displayAuthMessage("Registration successful! You are now logged in.", false);
-                // onAuthStateChanged will handle UI update
+                // onAuthStateChanged will handle UI update based on new user
             } catch (error) {
                 console.error("Registration error:", error);
                 if (error.code === 'auth/email-already-in-use') {
@@ -448,24 +450,23 @@
         }
 
         async function handleLogin() {
-            const username = authUsernameInput.value.trim(); // Get username
+            const username = authUsernameInput.value.trim(); 
             const password = authPasswordInput.value;
-            const email = username + DUMMY_DOMAIN; // Construct dummy email
+            const email = username + DUMMY_DOMAIN; 
 
             if (!username || !password) {
                 displayAuthMessage("Please enter both username and password.", true);
                 return;
             }
-            if (username.includes('@')) { // Prevent user from entering @ if we're adding dummy domain
+            if (username.includes('@')) { 
                 displayAuthMessage("Username cannot contain '@' symbol.", true);
                 return;
             }
 
             try {
-                // Signs in an existing user
                 await signInWithEmailAndPassword(auth, email, password);
                 displayAuthMessage("Login successful!", false);
-                // onAuthStateChanged will handle UI update
+                // onAuthStateChanged will handle UI update based on successful login
             } catch (error) {
                 console.error("Login error:", error);
                 if (error.code === 'auth/user-not-found' || error.code === 'auth/wrong-password') {
