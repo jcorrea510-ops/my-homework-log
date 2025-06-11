@@ -621,7 +621,7 @@
         function getTomorrowDate() {
             let tomorrow = new Date();
             const dayOfWeek = tomorrow.getDay(); // 0 for Sunday, 1 for Monday, etc.
-            if (dayOfWeek >= 1 && dayOfWeek <= 4) { 
+            if (dayOfWeek >= 1 && dayOfWeek >= 1 && dayOfWeek <= 4) { 
                 tomorrow.setDate(tomorrow.getDate() + 1);
             } else { 
                 const daysUntilMonday = (8 - dayOfWeek) % 7; 
@@ -1106,38 +1106,27 @@
                     scheduleList.appendChild(taskEl);
                 });
             }
-            updateTotalTime(); 
+            // Pass the full tasks array and deletedTaskIds to updateTotalTime
+            updateTotalTime(tasks, deletedTaskIds); 
         }
 
         /**
          * Calculates and displays the total estimated time for all non-deferred and non-deleted tasks in the schedule.
+         * @param {Array<Object>} allTasksFromSchedule - The full list of tasks from the current schedule document.
+         * @param {Array<string>} deletedTaskIdsFromSchedule - The list of task IDs marked as deleted for the current schedule.
          */
-        async function updateTotalTime() { // Made async
-            const tasks = await getCurrentScheduleTasksFromFirestore(); // Await the promise
-            // Fetch deletedTaskIds for the current day's schedule.
-            let deletedTaskIds = [];
-            const todayDate = formatDate(new Date());
-            if (db && auth && isAuthReady && userId) {
-                const scheduleDocRef = doc(db, `artifacts/${effectiveAppId}/users/${userId}/schedules`, todayDate);
-                try {
-                    const docSnap = await getDoc(scheduleDocRef);
-                    if (docSnap.exists()) {
-                        deletedTaskIds = docSnap.data().deletedTaskIds || [];
-                    }
-                } catch (error) {
-                    console.error("updateTotalTime: Error fetching deletedTaskIds:", error);
-                }
-            }
+        function updateTotalTime(allTasksFromSchedule, deletedTaskIdsFromSchedule) { 
+            console.log("updateTotalTime: Calculating total time with tasks:", allTasksFromSchedule, "and deleted IDs:", deletedTaskIdsFromSchedule);
             
             // Ensure tasks is an array before calling filter and reduce
-            if (!Array.isArray(tasks)) {
-                console.error("updateTotalTime: tasks is not an array:", tasks);
+            if (!Array.isArray(allTasksFromSchedule)) {
+                console.error("updateTotalTime: tasks is not an array:", allTasksFromSchedule);
                 totalTimeDisplay.textContent = 'Total Time: Error';
                 return;
             }
 
             // Filter out tasks that are deferred OR deleted
-            const activeTasks = tasks.filter(task => !task.isDeferred && !deletedTaskIds.includes(task.id));
+            const activeTasks = allTasksFromSchedule.filter(task => !task.isDeferred && !deletedTaskIdsFromSchedule.includes(task.id));
             
             const totalMinutes = activeTasks.reduce((sum, task) => sum + (task.time || 0), 0); 
             if (totalMinutes === 0) {
@@ -1584,11 +1573,25 @@
                         console.log(`undeleteTaskFromSchedule: Set task ${taskId} to isDeferred: false.`);
                     } else {
                         // If the task wasn't in the tasks array, it might be a new homework from calendar.
-                        // updateTonightSchedule will handle re-adding it if it's fresh homework.
-                        // For a custom task that was deleted, it would usually stay in `tasks` but be hidden.
-                        // This case is for homework tasks that were deleted AND their input was cleared.
-                        // The primary role here is to remove from `deletedTaskIds`.
-                        console.warn(`undeleteTaskFromSchedule: Task ${taskId} not found in tasks array, but proceeding with deletedTaskIds update.`);
+                        // We still need to create it in the tasks array if it's not there, so it's visible.
+                        // This case can happen if homework was cleared from calendar, then deleted from schedule, then undeleted.
+                        // We'll add a placeholder if it doesn't exist, to ensure it shows up when undeleted.
+                        const [type, date, className] = taskId.split('-');
+                        if (type === 'hw' && date && className) {
+                            const hwInput = document.getElementById(`hw-${date}-${className}`);
+                            if (hwInput && hwInput.value.trim() !== '') {
+                                tasks.push({
+                                    id: taskId,
+                                    text: `${className}: ${hwInput.value}`,
+                                    hwClass: className,
+                                    time: 30, // Default time
+                                    isDeferred: false
+                                });
+                                console.log(`undeleteTaskFromSchedule: Added homework task ${taskId} to tasks array as it was missing.`);
+                            }
+                        } else {
+                            console.warn(`undeleteTaskFromSchedule: Task ${taskId} not found in tasks array and is not a recognizable homework ID. Cannot auto-add.`);
+                        }
                     }
 
                     await saveSchedule(tasks, currentStartTime, updatedDeletedTaskIds);
