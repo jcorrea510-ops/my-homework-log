@@ -390,7 +390,7 @@
                     const displayUsername = user.email && user.email.endsWith('@homeworklog.app') 
                                             ? user.email.split('@')[0] 
                                             : user.email || 'Anonymous';
-                    userIdDisplay.textContent = `Logged in as: ${displayUsername} (ID: ${userId})`; 
+                    userIdDisplay.textContent = `Logged in as: ${displayUsername}`; // Removed ID part
                     showAppUI(); // Explicitly show UI here
                     // Set up Firestore data listeners for the logged-in user
                     setupDataListeners(); 
@@ -871,9 +871,11 @@
 
             taskItems.forEach((task, index) => {
                 const duration = task.time || 30; 
-                const startTimeStr = currentTime.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
-                const endTime = new Date(currentTime.getTime() + duration * 60000); 
-                const endTimeStr = endTime.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+                const taskStartTime = new Date(currentTime.getTime()); // Store the exact start time for this task
+                const taskEndTime = new Date(currentTime.getTime() + duration * 60000); 
+                
+                const startTimeStr = taskStartTime.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+                const endTimeStr = taskEndTime.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
 
                 const timelineItem = document.createElement('div');
                 timelineItem.className = 'timeline-item p-4 bg-indigo-50 rounded-xl flex items-center gap-4 shadow-sm';
@@ -885,16 +887,17 @@
                 `;
                 timelineOutput.appendChild(timelineItem);
                 
-                // Store relevant data for timer management
+                // Store relevant data for timer management including both start and end times
                 activeTimelineTasks.push({
                     index: index,
                     text: task.text,
                     element: timelineItem,
-                    endTime: endTime,
+                    startTime: taskStartTime, // Store as Date object
+                    endTime: taskEndTime,     // Store as Date object
                     completed: false
                 });
 
-                currentTime = endTime; 
+                currentTime = taskEndTime; // Next task starts after this one ends
             });
             
             saveSchedule(getCurrentScheduleTasks(), startTimeValue);
@@ -919,7 +922,6 @@
                 if (!activeTimelineTasks[i].completed) {
                     currentActiveTaskIndex = i;
                     startTimer(i);
-                    // activeTimelineTasks[i].element.classList.add('active'); // Highlight active task - handled in startTimer
                     return;
                 }
             }
@@ -1003,6 +1005,8 @@
             }
             if (currentActiveTaskIndex !== -1 && activeTimelineTasks[currentActiveTaskIndex] && activeTimelineTasks[currentActiveTaskIndex].element) {
                 activeTimelineTasks[currentActiveTaskIndex].element.classList.remove('active');
+                const timerSpan = activeTimelineTasks[currentActiveTaskIndex].element.querySelector('.countdown-timer');
+                if (timerSpan) timerSpan.textContent = ''; // Clear the timer text
             }
             currentActiveTaskIndex = -1;
             isBreakActive = false;
@@ -1010,6 +1014,7 @@
             endBreakBtn.classList.add('hidden');
             breakTimerDisplay.classList.add('hidden');
             breakStatusMessage.textContent = '';
+            breakTimerDisplay.textContent = '00:00'; // Reset break timer display
         }
 
         /**
@@ -1023,10 +1028,9 @@
             // Pause current assignment timer display
             if (activeTimerInterval) {
                 clearInterval(activeTimerInterval);
+                // The task will remain active but its timer display will change to "Paused" via updateTimer
                 if (currentActiveTaskIndex !== -1 && activeTimelineTasks[currentActiveTaskIndex] && activeTimelineTasks[currentActiveTaskIndex].element) {
-                    activeTimelineTasks[currentActiveTaskIndex].element.classList.remove('active');
-                    const timerSpan = activeTimelineTasks[currentActiveTaskIndex].element.querySelector('.countdown-timer');
-                    if (timerSpan) timerSpan.textContent = 'Paused'; // Indicate paused state
+                     // No need to remove 'active' class here, task is still implicitly active
                 }
             } else {
                 breakStatusMessage.textContent = "Break started (no active task to pause).";
@@ -1061,27 +1065,24 @@
             startBreakBtn.classList.remove('hidden');
             endBreakBtn.classList.add('hidden');
             breakStatusMessage.textContent = `Break ended. Schedule delayed by ${Math.floor(breakDuration / (1000 * 60))} minutes.`;
+            breakTimerDisplay.textContent = '00:00'; // Reset break timer display
 
-            // Shift all subsequent tasks' endTimes (and thus startTimes implicitly)
-            for (let i = currentActiveTaskIndex; i < activeTimelineTasks.length; i++) {
+            // Shift all subsequent tasks' start and end Times
+            // If there's no currentActiveTask, shift all tasks from the beginning of the timeline.
+            // Otherwise, shift only tasks from currentActiveTaskIndex onwards.
+            const startIndex = currentActiveTaskIndex === -1 ? 0 : currentActiveTaskIndex;
+
+            for (let i = startIndex; i < activeTimelineTasks.length; i++) {
+                activeTimelineTasks[i].startTime.setTime(activeTimelineTasks[i].startTime.getTime() + breakDuration);
                 activeTimelineTasks[i].endTime.setTime(activeTimelineTasks[i].endTime.getTime() + breakDuration);
-                // Also shift the stored startTime for accurate re-rendering
-                if (i > 0) { // For tasks after the first one, shift based on previous task's new end time
-                    activeTimelineTasks[i].startTime = new Date(activeTimelineTasks[i-1].endTime.getTime());
-                } else { // For the first task, shift its own start time
-                    activeTimelineTasks[i].startTime.setTime(activeTimelineTasks[i].startTime.getTime() + breakDuration);
-                }
             }
             
             // Re-render the timeline to reflect new times
             renderTimelineElements(); 
 
             // Resume the timer for the current active task (or next available)
-            if (currentActiveTaskIndex !== -1 && activeTimelineTasks[currentActiveTaskIndex] && !activeTimelineTasks[currentActiveTaskIndex].completed) {
-                startTimer(currentActiveTaskIndex); // Resume the same task
-            } else {
-                startNextAvailableTimer(); // Find next incomplete task and start its timer
-            }
+            // It will be the same task as before the break, if any, or the first incomplete one.
+            startNextAvailableTimer(); 
         }
 
 
