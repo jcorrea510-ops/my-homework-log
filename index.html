@@ -263,6 +263,18 @@
                 <div id="timeline-output" class="mt-8 space-y-4"> 
                     <!-- Generated timeline will appear here -->
                 </div>
+
+                <!-- Unscheduled Break Section -->
+                <div class="content-card p-6 sm:p-8 mt-10">
+                    <h3 class="text-2xl font-bold text-gray-800 mb-4 border-b border-gray-200 pb-2">Unscheduled Break</h3>
+                    <div class="flex flex-col sm:flex-row items-center justify-center gap-4">
+                        <button id="start-break-btn" class="btn-secondary py-3 px-6"><i class="fas fa-play-circle"></i> Start Break</button>
+                        <button id="end-break-btn" class="btn-red py-3 px-6 hidden"><i class="fas fa-stop-circle"></i> End Break</button>
+                        <span id="break-timer-display" class="text-3xl font-bold text-gray-700 hidden">00:00</span>
+                    </div>
+                    <p id="break-status-message" class="text-center text-sm text-gray-500 mt-4"></p>
+                </div>
+
             </div>
         </main>
     </div>
@@ -331,9 +343,18 @@
         const authMessage = document.getElementById('auth-message');
 
         // Timer variables
-        let activeTimerInterval = null;
+        let activeTimerInterval = null; // Interval for assignment countdown
         let currentActiveTaskIndex = -1; // -1 means no task is active
         let activeTimelineTasks = []; // Stores task data including DOM element reference for timer updates
+
+        // Break variables
+        let breakStartTime = 0; // Timestamp when break starts (ms)
+        let breakInterval = null; // Interval for break countdown
+        let isBreakActive = false; // Flag to track break state
+        const startBreakBtn = document.getElementById('start-break-btn');
+        const endBreakBtn = document.getElementById('end-break-btn');
+        const breakTimerDisplay = document.getElementById('break-timer-display');
+        const breakStatusMessage = document.getElementById('break-status-message');
         
         // --- Initial App Load ---
         document.addEventListener('DOMContentLoaded', initializeAppAndAuth);
@@ -386,18 +407,7 @@
                     renderScheduleList([]); // Clear the displayed schedule
                     userIdDisplay.textContent = `Please log in.`;
                     // Clear any active timers if user logs out
-                    if (activeTimerInterval) {
-                        clearInterval(activeTimerInterval);
-                        activeTimerInterval = null;
-                        currentActiveTaskIndex = -1;
-                        activeTimelineTasks.forEach(task => {
-                            if (task.element) {
-                                task.element.classList.remove('active');
-                                const timerSpan = task.element.querySelector('.countdown-timer');
-                                if (timerSpan) timerSpan.textContent = '';
-                            }
-                        });
-                    }
+                    stopAllTimersAndBreaks();
                 }
             });
 
@@ -832,6 +842,8 @@
          */
         function generateTimeline() {
             console.log("generateTimeline: Generating timeline.");
+            stopAllTimersAndBreaks(); // Ensure no active timers/breaks before generating new timeline
+
             const startTimeValue = document.getElementById('start-time').value;
             if (!startTimeValue) {
                 console.warn("generateTimeline: Start time not set.");
@@ -932,6 +944,8 @@
             // Remove 'active' class from any previous task that might still be highlighted
             if (currentActiveTaskIndex !== -1 && activeTimelineTasks[currentActiveTaskIndex] && activeTimelineTasks[currentActiveTaskIndex].element) {
                  activeTimelineTasks[currentActiveTaskIndex].element.classList.remove('active');
+                 const prevTimerSpan = activeTimelineTasks[currentActiveTaskIndex].element.querySelector('.countdown-timer');
+                 if (prevTimerSpan) prevTimerSpan.textContent = ''; // Clear previous timer text
             }
             currentActiveTaskIndex = taskIndex; // Set the new active task
 
@@ -943,33 +957,133 @@
             if (!timerSpan) return;
 
             const updateTimer = () => {
-                const now = new Date().getTime();
-                const timeLeft = task.endTime.getTime() - now; // Time left in milliseconds
-
-                if (timeLeft <= 0) {
-                    clearInterval(activeTimerInterval);
-                    activeTimerInterval = null;
-                    timerSpan.textContent = "Time's up!";
-                    task.completed = true; // Mark as completed
-                    task.element.classList.add('completed'); // Add line-through style
-                    const checkbox = task.element.querySelector('input[type="checkbox"]');
-                    if (checkbox) checkbox.checked = true; // Check the box
-                    console.log(`Task "${task.text}" completed. Moving to next.`);
-                    startNextAvailableTimer(); // Move to the next task
+                if (isBreakActive) { // Do not update timer if break is active
+                    timerSpan.textContent = "Paused"; // Indicate paused state
                     return;
                 }
 
-                // FIX: Calculate total minutes and seconds
+                const now = new Date().getTime();
+                let timeLeft = task.endTime.getTime() - now; // Time left in milliseconds
+
+                let isOverdue = false;
+                if (timeLeft < 0) {
+                    isOverdue = true;
+                    timeLeft = Math.abs(timeLeft); // Work with positive value for calculation
+                }
+                
                 const totalSeconds = Math.floor(timeLeft / 1000);
                 const minutes = Math.floor(totalSeconds / 60);
                 const seconds = totalSeconds % 60;
 
-                timerSpan.textContent = `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+                const minutesStr = String(minutes).padStart(2, '0');
+                const secondsStr = String(seconds).padStart(2, '0');
+
+                timerSpan.textContent = `${isOverdue ? '-' : ''}${minutesStr}:${secondsStr}`;
+                if (isOverdue) {
+                    timerSpan.textContent += " (Time's up!)"; // Add "Time's up!" when overdue
+                }
             };
 
             updateTimer(); // Initial call to display immediately
             activeTimerInterval = setInterval(updateTimer, 1000); // Update every second
         }
+
+        /**
+         * Clears all assignment and break timers, and resets active task index.
+         * Used for logout or when generating a new timeline.
+         */
+        function stopAllTimersAndBreaks() {
+            if (activeTimerInterval) {
+                clearInterval(activeTimerInterval);
+                activeTimerInterval = null;
+            }
+            if (breakInterval) {
+                clearInterval(breakInterval);
+                breakInterval = null;
+            }
+            if (currentActiveTaskIndex !== -1 && activeTimelineTasks[currentActiveTaskIndex] && activeTimelineTasks[currentActiveTaskIndex].element) {
+                activeTimelineTasks[currentActiveTaskIndex].element.classList.remove('active');
+            }
+            currentActiveTaskIndex = -1;
+            isBreakActive = false;
+            startBreakBtn.classList.remove('hidden');
+            endBreakBtn.classList.add('hidden');
+            breakTimerDisplay.classList.add('hidden');
+            breakStatusMessage.textContent = '';
+        }
+
+        /**
+         * Starts an unscheduled break.
+         */
+        function startBreak() {
+            if (isBreakActive) return; // Already on break
+            isBreakActive = true;
+            breakStartTime = new Date().getTime();
+
+            // Pause current assignment timer display
+            if (activeTimerInterval) {
+                clearInterval(activeTimerInterval);
+                if (currentActiveTaskIndex !== -1 && activeTimelineTasks[currentActiveTaskIndex] && activeTimelineTasks[currentActiveTaskIndex].element) {
+                    activeTimelineTasks[currentActiveTaskIndex].element.classList.remove('active');
+                    const timerSpan = activeTimelineTasks[currentActiveTaskIndex].element.querySelector('.countdown-timer');
+                    if (timerSpan) timerSpan.textContent = 'Paused'; // Indicate paused state
+                }
+            } else {
+                breakStatusMessage.textContent = "Break started (no active task to pause).";
+            }
+            
+            startBreakBtn.classList.add('hidden');
+            endBreakBtn.classList.remove('hidden');
+            breakTimerDisplay.classList.remove('hidden');
+            breakStatusMessage.textContent = "Break in progress...";
+
+            let elapsedBreakTime = 0;
+            breakInterval = setInterval(() => {
+                elapsedBreakTime = new Date().getTime() - breakStartTime;
+                const totalSeconds = Math.floor(elapsedBreakTime / 1000);
+                const minutes = Math.floor(totalSeconds / 60);
+                const seconds = totalSeconds % 60;
+                breakTimerDisplay.textContent = `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+            }, 1000);
+        }
+
+        /**
+         * Ends an unscheduled break and shifts the schedule.
+         */
+        function endBreak() {
+            if (!isBreakActive) return; // Not on break
+            isBreakActive = false;
+
+            clearInterval(breakInterval);
+            const breakDuration = new Date().getTime() - breakStartTime; // Total duration of this break
+            
+            breakTimerDisplay.classList.add('hidden');
+            startBreakBtn.classList.remove('hidden');
+            endBreakBtn.classList.add('hidden');
+            breakStatusMessage.textContent = `Break ended. Schedule delayed by ${Math.floor(breakDuration / (1000 * 60))} minutes.`;
+
+            // Shift all subsequent tasks' endTimes (and thus startTimes implicitly)
+            for (let i = currentActiveTaskIndex; i < activeTimelineTasks.length; i++) {
+                activeTimelineTasks[i].endTime.setTime(activeTimelineTasks[i].endTime.getTime() + breakDuration);
+                // Also shift the stored startTime for accurate re-rendering
+                if (i > 0) { // For tasks after the first one, shift based on previous task's new end time
+                    activeTimelineTasks[i].startTime = new Date(activeTimelineTasks[i-1].endTime.getTime());
+                } else { // For the first task, shift its own start time
+                    activeTimelineTasks[i].startTime.setTime(activeTimelineTasks[i].startTime.getTime() + breakDuration);
+                }
+            }
+            
+            // Re-render the timeline to reflect new times
+            renderTimelineElements(); 
+
+            // Resume the timer for the current active task (or next available)
+            if (currentActiveTaskIndex !== -1 && activeTimelineTasks[currentActiveTaskIndex] && !activeTimelineTasks[currentActiveTaskIndex].completed) {
+                startTimer(currentActiveTaskIndex); // Resume the same task
+            } else {
+                startNextAvailableTimer(); // Find next incomplete task and start its timer
+            }
+        }
+
 
         /**
          * Retrieves the current list of tasks from the schedule list DOM elements.
@@ -983,6 +1097,37 @@
                 ...(item.dataset.hwClass && { hwClass: item.dataset.hwClass }) 
             }));
         }
+
+        // New function to render or re-render timeline elements from activeTimelineTasks
+        function renderTimelineElements() {
+            timelineOutput.innerHTML = '<h3 class="text-2xl font-bold text-gray-800 mb-4 border-b border-gray-200 pb-2">Your Timeline</h3>';
+
+            if (activeTimelineTasks.length === 0) {
+                timelineOutput.innerHTML += `<p class="text-gray-500">No tasks to schedule. Add some above!</p>`;
+                return;
+            }
+
+            activeTimelineTasks.forEach((task, index) => {
+                const startTimeStr = task.startTime.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+                const endTimeStr = task.endTime.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+
+                const timelineItem = document.createElement('div');
+                timelineItem.className = 'timeline-item p-4 bg-indigo-50 rounded-xl flex items-center gap-4 shadow-sm';
+                timelineItem.innerHTML = `
+                    <input type="checkbox" class="h-6 w-6 rounded-md border-gray-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer">
+                    <span class="flex-grow font-medium text-indigo-800 text-lg">${task.text}</span>
+                    <strong class="font-semibold text-indigo-900 text-md">${startTimeStr} - ${endTimeStr}</strong>
+                    <span class="countdown-timer font-bold text-lg text-red-600 ml-4"></span>
+                `;
+                if (task.completed) {
+                    timelineItem.classList.add('completed');
+                    timelineItem.querySelector('input[type="checkbox"]').checked = true;
+                }
+                timelineOutput.appendChild(timelineItem);
+                task.element = timelineItem; // Store reference to the created DOM element
+            });
+        }
+
 
         // --- Event Listeners ---
         // Auth buttons
@@ -1043,7 +1188,8 @@
                 taskItem.remove(); 
                 saveSchedule(getCurrentScheduleTasks(), document.getElementById('start-time').value); 
             }
-        });
+        }
+        );
         
         // Generate timeline
         document.getElementById('generate-schedule-btn').addEventListener('click', generateTimeline);
@@ -1054,30 +1200,40 @@
                 console.log("Event: Timeline checkbox toggled.");
                 const checkbox = e.target;
                 const timelineItem = checkbox.closest('.timeline-item');
-                // Adjust index calculation to account for the H3 title if present, otherwise assume 0-indexed direct children
+                // Find the index of the timeline item
                 const taskIndex = Array.from(timelineOutput.children).filter(child => child.classList.contains('timeline-item')).indexOf(timelineItem); 
 
                 if (taskIndex >= 0 && taskIndex < activeTimelineTasks.length) {
                     activeTimelineTasks[taskIndex].completed = checkbox.checked;
                     timelineItem.classList.toggle('completed', checkbox.checked);
                     
-                    // Stop current timer if it's the active task being completed
-                    if (checkbox.checked && currentActiveTaskIndex === taskIndex) {
-                         if (activeTimerInterval) {
+                    // If checked, try to move to the next timer
+                    if (checkbox.checked) {
+                        // Clear the timer for the task that was just checked
+                        const timerSpan = timelineItem.querySelector('.countdown-timer');
+                        if (timerSpan) timerSpan.textContent = 'Done!';
+                        
+                        // Stop the main timer interval if this was the active task
+                        if (currentActiveTaskIndex === taskIndex) {
                             clearInterval(activeTimerInterval);
                             activeTimerInterval = null;
-                         }
-                         if (timelineItem) timelineItem.classList.remove('active'); // Remove highlight immediately
-                         const timerSpan = timelineItem.querySelector('.countdown-timer');
-                         if (timerSpan) timerSpan.textContent = 'Done!'; // Indicate completion
-                         currentActiveTaskIndex = -1; // Reset active task index
+                            currentActiveTaskIndex = -1; // No active task currently
+                        }
+                        startNextAvailableTimer(); // Find and start the next timer
+                    } else {
+                        // If unchecked, and it's the current active task or no task is active, try to reactivate it
+                        if (currentActiveTaskIndex === -1 || currentActiveTaskIndex === taskIndex) {
+                            startNextAvailableTimer(); // This will re-evaluate and potentially restart this task's timer
+                        }
                     }
-
-                    // Always try to start the next available timer after a change
-                    startNextAvailableTimer(); 
                 }
             }
         });
+
+        // Break buttons
+        startBreakBtn.addEventListener('click', startBreak);
+        endBreakBtn.addEventListener('click', endBreak);
+
 
         // --- Drag and Drop Logic for Schedule Items ---
         let draggedItem = null; 
