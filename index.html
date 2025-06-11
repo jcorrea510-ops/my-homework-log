@@ -666,7 +666,7 @@
             dayHeader.className = 'day-header-button md:pointer-events-none md:cursor-default'; // Disable pointer events on desktop
             dayHeader.innerHTML = `
                 <span class="flex-grow text-lg md:text-xl font-bold md:font-extrabold">${date.toLocaleDateString('en-US', { weekday: 'short' })}</span>
-                <span class="text-sm md:text-md text-gray-500 md:text-gray-700 flex-shrink-0 mr-2">${date.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric' })}</span>
+                <span class="text-sm md:text-md text-gray-500 md:text-gray-700 flex-shrink-0 mr-2">${date.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric' })}</p></span>
                 <i class="fas fa-chevron-down text-lg md:hidden"></i> <!-- Caret only visible on mobile -->
             `;
             dayHeader.dataset.dateString = dateString; // Store date for identification
@@ -823,10 +823,11 @@
                 console.log("onSnapshot(schedule): Schedule data updated. Doc exists:", docSnap.exists);
                 if (docSnap.exists()) {
                     const data = docSnap.data();
-                    renderScheduleList(data.tasks || []); 
+                    // Pass deletedTaskIds to renderScheduleList for filtering
+                    renderScheduleList(data.tasks || [], data.deletedTaskIds || []);
                     if(data.startTime) document.getElementById('start-time').value = data.startTime; 
                 } else {
-                    renderScheduleList([]); 
+                    renderScheduleList([]); // If no doc, render empty list
                 }
             }, (error) => {
                 console.error("Error fetching schedule: ", error);
@@ -888,32 +889,58 @@
                 }
             }
 
+            let currentScheduleData = {};
             let existingTasks = [];
+            let existingDeletedTaskIds = [];
+
             if (db && auth && isAuthReady && userId) {
                 console.log("updateTonightSchedule: Fetching today's schedule from Firestore.");
                 const scheduleDocRef = doc(db, `artifacts/${effectiveAppId}/users/${userId}/schedules`, todayDate);
                 const scheduleDocSnap = await getDoc(scheduleDocRef);
-                existingTasks = scheduleDocSnap.exists() ? scheduleDocSnap.data().tasks || [] : [];
-                console.log("updateTonightSchedule: Existing schedule tasks:", existingTasks);
+                if (scheduleDocSnap.exists()) {
+                    currentScheduleData = scheduleDocSnap.data();
+                    existingTasks = currentScheduleData.tasks || [];
+                    existingDeletedTaskIds = currentScheduleData.deletedTaskIds || [];
+                    console.log("updateTonightSchedule: Existing schedule tasks:", existingTasks);
+                    console.log("updateTonightSchedule: Existing deleted task IDs:", existingDeletedTaskIds);
+
+                } else {
+                    console.log("updateTonightSchedule: No schedule document found for today.");
+                }
             } else {
                 console.log("updateTonightSchedule: Operating offline, fetching schedule from local memory.");
                 existingTasks = localScheduleData.tasks;
+                // For local, we don't have deletedTaskIds separately, implies full data.
+                // If it needed to, we'd need a local storage structure for deletedTaskIds too.
             }
             
-            const userAddedTasks = existingTasks.filter(t => !t.hwClass);
-            const updatedHwTasks = hwTasks.map(newHwTask => {
+            const userAddedTasks = existingTasks.filter(t => !t.hwClass); // Custom tasks remain
+            let updatedHwTasks = hwTasks.map(newHwTask => {
                 const existingVersion = existingTasks.find(t => t.hwClass === newHwTask.hwClass);
-                 return {
+                return {
                     id: existingVersion ? existingVersion.id : `task-${newHwTask.hwClass}-${Date.now()}`,
                     text: newHwTask.text,
-                    time: existingVersion ? existingVersion.time : 30, 
+                    time: existingVersion ? existingVersion.time : 30,
                     hwClass: newHwTask.hwClass,
                 };
             });
+
+            let newDeletedTaskIds = [...existingDeletedTaskIds]; // Start with existing deleted IDs
+
+            // Remove any re-added homework tasks from the deletedTaskIds list
+            updatedHwTasks.forEach(hwTask => {
+                const indexInDeleted = newDeletedTaskIds.indexOf(hwTask.id);
+                if (indexInDeleted > -1) {
+                    newDeletedTaskIds.splice(indexInDeleted, 1); // Remove it
+                    console.log(`updateTonightSchedule: Removed ${hwTask.id} from deleted list (re-added via calendar).`);
+                }
+            });
+
             const finalTasks = [...userAddedTasks, ...updatedHwTasks];
             console.log("updateTonightSchedule: Final tasks for schedule:", finalTasks);
             
-            await saveSchedule(finalTasks, document.getElementById('start-time').value);
+            // Save the schedule with updated tasks and new deletedTaskIds list
+            await saveSchedule(finalTasks, document.getElementById('start-time').value, newDeletedTaskIds);
         }
 
         /**
@@ -947,19 +974,20 @@
          * Saves today's schedule tasks and start time.
          * @param {Array<Object>} tasks - An array of task objects.
          * @param {string} startTime - The start time for the schedule (e.g., "18:00").
+         * @param {Array<string>} [deletedTaskIds=[]] - Optional array of task IDs to mark as deleted from the schedule.
          */
-        async function saveSchedule(tasks, startTime) {
-            console.log("saveSchedule: Saving schedule tasks. Num tasks:", tasks.length, "Start time:", startTime);
+        async function saveSchedule(tasks, startTime, deletedTaskIds = []) {
+            console.log("saveSchedule: Saving schedule tasks. Num tasks:", tasks.length, "Start time:", startTime, "Deleted IDs:", deletedTaskIds);
              if (!db || !auth || !isAuthReady || !userId) { 
                  console.warn("saveSchedule: Firebase not ready or user not logged in, saving to local memory and rendering.");
                  localScheduleData = { tasks, startTime };
-                 renderScheduleList(tasks);
+                 renderScheduleList(tasks); // Render all tasks locally, deletion won't persist on refresh
              } else {
                  try {
                     console.log("saveSchedule: Saving to Firestore.");
                     const todayDate = formatDate(new Date());
                     const docRef = doc(db, `artifacts/${effectiveAppId}/users/${userId}/schedules`, todayDate);
-                    await setDoc(docRef, { tasks, startTime }, { merge: true });
+                    await setDoc(docRef, { tasks, startTime, deletedTaskIds }, { merge: true }); // Save deletedTaskIds
                     console.log("saveSchedule: Successfully saved to Firestore.");
                  } catch (error) {
                      console.error("Error saving schedule: ", error);
@@ -971,14 +999,19 @@
         /**
          * Renders the list of tasks for "Tonight's Schedule".
          * @param {Array<Object>} tasks - An array of task objects to render.
+         * @param {Array<string>} [deletedTaskIds=[]] - Array of task IDs that should not be rendered.
          */
-        function renderScheduleList(tasks) {
-            console.log("renderScheduleList: Rendering schedule list. Tasks:", tasks);
-            scheduleList.innerHTML = ''; 
-            if (!tasks || tasks.length === 0) {
+        function renderScheduleList(tasks, deletedTaskIds = []) { // Accept deletedTaskIds
+            console.log("renderScheduleList: Rendering schedule list. Tasks:", tasks, "Deleted IDs:", deletedTaskIds);
+            scheduleList.innerHTML = '';
+            
+            // Filter tasks based on deletedTaskIds
+            const filteredTasks = tasks.filter(task => !deletedTaskIds.includes(task.id));
+
+            if (!filteredTasks || filteredTasks.length === 0) {
                 scheduleList.innerHTML = `<p class="text-gray-500 text-center p-4">No tasks for tonight. Add some or relax!</p>`;
             } else {
-                 tasks.forEach(task => {
+                 filteredTasks.forEach(task => { // Iterate over filtered tasks
                     const taskEl = document.createElement('div');
                     taskEl.className = 'task-item flex items-center gap-4 p-4 bg-white border border-gray-200 rounded-xl shadow-sm'; 
                     taskEl.draggable = true; 
@@ -1253,10 +1286,10 @@
             
             for (let i = startIndex; i < activeTimelineTasks.length; i++) {
                 // Shift only tasks that haven't been completed yet or are the current active task
-                if (!activeTimelineTasks[i].completed || i === currentActiveTaskIndex) {
-                    activeTimelineTasks[i].startTime.setTime(activeTimelineTasks[i].startTime.getTime() + breakDuration);
-                    activeTimelineTasks[i].endTime.setTime(activeTimelineTasks[i].endTime.getTime() + breakDuration);
-                }
+                // We should shift all tasks from the current task onwards regardless of their 'completed' status
+                // because even completed tasks contribute to the overall timeline spacing.
+                activeTimelineTasks[i].startTime.setTime(activeTimelineTasks[i].startTime.getTime() + breakDuration);
+                activeTimelineTasks[i].endTime.setTime(activeTimelineTasks[i].endTime.getTime() + breakDuration);
             }
             
             // Re-render the timeline to reflect new times
@@ -1273,6 +1306,8 @@
          * @returns {Array<Object>} - An array of task objects.
          */
         function getCurrentScheduleTasks() {
+            // This function now returns tasks based on the currently displayed schedule list.
+            // It's used when saving the order or when adding a new custom task.
             return Array.from(scheduleList.querySelectorAll('.task-item')).map(item => ({
                 id: item.dataset.taskId,
                 text: item.querySelector('span').textContent,
@@ -1350,7 +1385,23 @@
             if (text) {
                 let tasks = getCurrentScheduleTasks();
                 tasks.push({ id: `task-custom-${Date.now()}`, text: text, time: 30 }); 
-                saveSchedule(tasks, document.getElementById('start-time').value);
+                // When adding a new task, we need to get the current deletedTaskIds from Firestore
+                // and pass them along to ensure the save operation preserves existing deletions.
+                // However, since add-task doesn't re-introduce a previously deleted hw item,
+                // we can just fetch the current deletedTaskIds from Firebase and pass them.
+                const todayDate = formatDate(new Date());
+                if (db && auth && isAuthReady && userId) {
+                    const scheduleDocRef = doc(db, `artifacts/${effectiveAppId}/users/${userId}/schedules`, todayDate);
+                    getDoc(scheduleDocRef).then(docSnap => {
+                        const existingDeletedTaskIds = docSnap.exists() ? docSnap.data().deletedTaskIds || [] : [];
+                        saveSchedule(tasks, document.getElementById('start-time').value, existingDeletedTaskIds);
+                    }).catch(error => {
+                        console.error("Error fetching existing deletedTaskIds for add-task:", error);
+                        saveSchedule(tasks, document.getElementById('start-time').value); // Fallback without deleted IDs
+                    });
+                } else {
+                    saveSchedule(tasks, document.getElementById('start-time').value);
+                }
                 input.value = ''; 
             }
         });
@@ -1359,20 +1410,70 @@
         scheduleList.addEventListener('change', (e) => {
              if (e.target.matches('.time-estimate')) {
                  console.log("Event: Time estimate changed.");
-                 saveSchedule(getCurrentScheduleTasks(), document.getElementById('start-time').value);
+                 // When time estimate changes, we need to preserve the deletedTaskIds list
+                 const todayDate = formatDate(new Date());
+                 if (db && auth && isAuthReady && userId) {
+                     const scheduleDocRef = doc(db, `artifacts/${effectiveAppId}/users/${userId}/schedules`, todayDate);
+                     getDoc(scheduleDocRef).then(docSnap => {
+                         const existingDeletedTaskIds = docSnap.exists() ? docSnap.data().deletedTaskIds || [] : [];
+                         saveSchedule(getCurrentScheduleTasks(), document.getElementById('start-time').value, existingDeletedTaskIds);
+                     }).catch(error => {
+                         console.error("Error fetching existing deletedTaskIds for time estimate change:", error);
+                         saveSchedule(getCurrentScheduleTasks(), document.getElementById('start-time').value);
+                     });
+                 } else {
+                     saveSchedule(getCurrentScheduleTasks(), document.getElementById('start-time').value);
+                 }
              }
         });
         
         // Remove task
-        scheduleList.addEventListener('click', (e) => {
+        scheduleList.addEventListener('click', async (e) => { // Made async to await Firestore operations
             if (e.target.closest('.remove-task')) {
                 console.log("Event: Remove task button clicked.");
                 const taskItem = e.target.closest('.task-item');
-                taskItem.remove(); 
-                saveSchedule(getCurrentScheduleTasks(), document.getElementById('start-time').value); 
+                const taskIdToRemove = taskItem.dataset.taskId;
+
+                if (!taskIdToRemove) {
+                    console.error("Task ID not found for deletion.");
+                    return;
+                }
+
+                // Fetch current schedule data including existing tasks and deleted IDs
+                let currentTasksInDb = []; // This will hold all tasks, including potentially invisible ones
+                let currentDeletedTaskIds = [];
+                const todayDate = formatDate(new Date());
+
+                if (db && auth && isAuthReady && userId) {
+                    const scheduleDocRef = doc(db, `artifacts/${effectiveAppId}/users/${userId}/schedules`, todayDate);
+                    try {
+                        const docSnap = await getDoc(scheduleDocRef);
+                        if (docSnap.exists()) {
+                            const data = docSnap.data();
+                            currentTasksInDb = data.tasks || [];
+                            currentDeletedTaskIds = data.deletedTaskIds || [];
+                        }
+                    } catch (error) {
+                        console.error("Error fetching current schedule data for remove-task:", error);
+                    }
+                } else {
+                    // Fallback for local memory. For simplicity, local mode won't persist "deleted" state.
+                    // If operating strictly offline, local storage would need to replicate Firestore structure.
+                    currentTasksInDb = localScheduleData.tasks;
+                }
+
+                // Add the task ID to the list of deleted tasks if it's not already there
+                if (!currentDeletedTaskIds.includes(taskIdToRemove)) {
+                    currentDeletedTaskIds.push(taskIdToRemove);
+                }
+
+                // Save the *full* task list (including the one just "deleted" from view)
+                // along with the updated deletedTaskIds list.
+                // The onSnapshot listener will then re-render the UI, applying the filter.
+                await saveSchedule(currentTasksInDb, document.getElementById('start-time').value, currentDeletedTaskIds);
+                // Do NOT remove from DOM directly here. Let the onSnapshot listener handle the UI update.
             }
-        }
-        );
+        });
         
         // Generate timeline
         document.getElementById('generate-schedule-btn').addEventListener('click', generateTimeline);
@@ -1427,7 +1528,21 @@
                 console.log("Event: Drag end.");
                 draggedItem.classList.remove('dragging'); 
                 draggedItem = null;
-                saveSchedule(getCurrentScheduleTasks(), document.getElementById('start-time').value); 
+                // When dragging ends, the order might have changed, save the new order.
+                // Need to fetch current deletedTaskIds to preserve them.
+                const todayDate = formatDate(new Date());
+                if (db && auth && isAuthReady && userId) {
+                    const scheduleDocRef = doc(db, `artifacts/${effectiveAppId}/users/${userId}/schedules`, todayDate);
+                    getDoc(scheduleDocRef).then(docSnap => {
+                        const existingDeletedTaskIds = docSnap.exists() ? docSnap.data().deletedTaskIds || [] : [];
+                        saveSchedule(getCurrentScheduleTasks(), document.getElementById('start-time').value, existingDeletedTaskIds);
+                    }).catch(error => {
+                        console.error("Error fetching existing deletedTaskIds for dragend:", error);
+                        saveSchedule(getCurrentScheduleTasks(), document.getElementById('start-time').value);
+                    });
+                } else {
+                    saveSchedule(getCurrentScheduleTasks(), document.getElementById('start-time').value);
+                }
             }
         });
         
