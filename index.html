@@ -213,17 +213,32 @@
             .day-header-button .fas.fa-chevron-down {
                 display: none;
             }
+            .day-header-button {
+                /* Remove pointer events on desktop to keep it simple, just a label */
+                pointer-events: none;
+                cursor: default;
+            }
         }
-        /* Hide content on smaller screens, show on larger screens by default */
+        
+        /* Content wrapper for homework inputs - controlled by JS for mobile, always block on desktop */
         .day-content-wrapper {
             transition: max-height 0.3s ease-out; /* Smooth transition for expand/collapse */
             overflow: hidden; /* Hide overflow during transition */
-            max-height: 0; /* Initially collapsed */
         }
-        .day-content-wrapper.expanded {
-            max-height: 500px; /* Max height to allow content to show, adjust if needed */
+        /* On mobile, explicitly start hidden (display: none) and transition max-height to 0 */
+        /* On desktop, always display as block and max-height none */
+        @media (max-width: 767px) { /* Styles for mobile only */
+            .day-content-wrapper {
+                display: none; /* Starts hidden on mobile */
+                max-height: 0;
+                /* Remove the 'hidden' class from the HTML and let JS manage display/max-height */
+            }
+            .day-content-wrapper.expanded {
+                display: block; /* Show content when expanded */
+                max-height: 500px; /* An arbitrary large height to allow content to show */
+            }
         }
-        @media (min-width: 768px) {
+        @media (min-width: 768px) { /* Styles for desktop and larger tablets */
             .day-content-wrapper {
                 max-height: none !important; /* Override max-height on larger screens */
                 display: block !important;   /* Ensure it's block on larger screens */
@@ -657,9 +672,9 @@
             dayHeader.dataset.dateString = dateString; // Store date for identification
             col.appendChild(dayHeader);
 
-            // Content wrapper for homework inputs - hidden by default on mobile, block on md and larger
+            // Content wrapper for homework inputs - controlled by JS for mobile, block on md and larger
             const contentWrapper = document.createElement('div');
-            contentWrapper.className = 'day-content-wrapper hidden md:block space-y-3'; // Hidden on mobile, block on md+
+            contentWrapper.className = 'day-content-wrapper space-y-3'; // No 'hidden' or 'md:block' here, JS controls it
             contentWrapper.dataset.dateString = dateString; // Store date for identification
 
             CLASS_NAMES.forEach(name => {
@@ -678,53 +693,95 @@
 
         /**
          * Adds event listeners to day headers for mobile collapse/expand functionality.
-         * Only runs if the screen is mobile-sized.
+         * Also initializes display state based on screen size.
          */
         function addMobileDayCollapseListeners() {
-            if (isMobileMediaQuery.matches) { // Only add listeners if on mobile
-                const dayHeaders = calendarGrid.querySelectorAll('.day-header-button');
-                dayHeaders.forEach(header => {
-                    header.addEventListener('click', (e) => {
-                        const dateString = header.dataset.dateString;
-                        const contentWrapper = calendarGrid.querySelector(`.day-content-wrapper[data-date-string="${dateString}"]`);
-                        const chevron = header.querySelector('.fa-chevron-down');
+            const dayHeaders = calendarGrid.querySelectorAll('.day-header-button');
+            const contentWrappers = calendarGrid.querySelectorAll('.day-content-wrapper');
 
-                        if (contentWrapper.classList.contains('expanded')) {
-                            contentWrapper.classList.remove('expanded');
-                            chevron.classList.remove('rotate-180');
-                        } else {
-                            // Collapse all other expanded days
-                            calendarGrid.querySelectorAll('.day-content-wrapper.expanded').forEach(expandedContent => {
-                                expandedContent.classList.remove('expanded');
-                                const correspondingHeader = calendarGrid.querySelector(`.day-header-button[data-date-string="${expandedContent.dataset.dateString}"]`);
-                                if (correspondingHeader) {
-                                    correspondingHeader.classList.remove('active-day');
-                                    correspondingHeader.querySelector('.fa-chevron-down').classList.remove('rotate-180');
-                                }
-                            });
-                            // Expand the clicked day
-                            contentWrapper.classList.add('expanded');
-                            header.classList.add('active-day');
-                            chevron.classList.add('rotate-180');
-                        }
-                    });
+            if (isMobileMediaQuery.matches) { // Mobile view specific logic
+                contentWrappers.forEach(content => {
+                    content.style.display = 'none'; // Initially hide all content on mobile
+                    content.style.maxHeight = '0px'; // Set max-height to 0 for collapsing animation
+                    content.classList.remove('expanded'); // Ensure no 'expanded' class initially
                 });
-            } else {
-                // On larger screens, ensure content is visible and headers are not interactive
-                calendarGrid.querySelectorAll('.day-content-wrapper').forEach(content => {
-                    content.classList.remove('hidden', 'expanded');
-                    content.style.maxHeight = 'none'; // Ensure content is fully visible
+                dayHeaders.forEach(header => {
+                    header.classList.remove('active-day'); // No active day initially
+                    const chevron = header.querySelector('.fa-chevron-down');
+                    if (chevron) chevron.classList.remove('rotate-180'); // Reset chevron rotation
+
+                    header.addEventListener('click', handleDayHeaderClick);
                 });
-                calendarGrid.querySelectorAll('.day-header-button').forEach(header => {
+            } else { // Desktop/Tablet view specific logic
+                contentWrappers.forEach(content => {
+                    content.style.display = 'block'; // Always visible on desktop
+                    content.style.maxHeight = 'none'; // No max-height constraint
+                    content.classList.remove('expanded'); // No 'expanded' class needed
+                });
+                dayHeaders.forEach(header => {
                     header.classList.remove('active-day');
-                    header.querySelector('.fa-chevron-down')?.classList.remove('rotate-180');
+                    const chevron = header.querySelector('.fa-chevron-down');
+                    if (chevron) chevron.classList.remove('rotate-180');
+                    header.removeEventListener('click', handleDayHeaderClick); // Remove listener on desktop
                 });
             }
         }
 
+        /**
+         * Handles the click event for a day header on mobile.
+         * Toggles the visibility and applies expansion/collapse animation.
+         */
+        function handleDayHeaderClick(e) {
+            const header = e.currentTarget; // Use currentTarget to ensure we get the button
+            const dateString = header.dataset.dateString;
+            const contentWrapper = calendarGrid.querySelector(`.day-content-wrapper[data-date-string="${dateString}"]`);
+            const chevron = header.querySelector('.fa-chevron-down');
+
+            if (!contentWrapper || !chevron) return; // Safety check
+
+            if (contentWrapper.style.display === 'block') { // Currently expanded, so collapse
+                header.classList.remove('active-day');
+                chevron.classList.remove('rotate-180');
+                contentWrapper.style.maxHeight = '0px';
+                // Listen for transition end to set display: none;
+                contentWrapper.addEventListener('transitionend', function handler() {
+                    contentWrapper.style.display = 'none';
+                    contentWrapper.removeEventListener('transitionend', handler);
+                }, { once: true });
+            } else { // Currently collapsed, so expand
+                // Collapse all other expanded days first
+                calendarGrid.querySelectorAll('.day-content-wrapper').forEach(otherContent => {
+                    if (otherContent !== contentWrapper && otherContent.style.display === 'block') {
+                        const otherHeader = calendarGrid.querySelector(`.day-header-button[data-date-string="${otherContent.dataset.dateString}"]`);
+                        const otherChevron = otherHeader ? otherHeader.querySelector('.fa-chevron-down') : null;
+
+                        otherHeader.classList.remove('active-day');
+                        if (otherChevron) otherChevron.classList.remove('rotate-180');
+                        otherContent.style.maxHeight = '0px';
+                        otherContent.addEventListener('transitionend', function otherHandler() {
+                            otherContent.style.display = 'none';
+                            otherContent.removeEventListener('transitionend', otherHandler);
+                        }, { once: true });
+                    }
+                });
+
+                // Expand the clicked day
+                contentWrapper.style.display = 'block'; // Make it visible first
+                // Use requestAnimationFrame to ensure display change is rendered before max-height transition starts
+                requestAnimationFrame(() => {
+                    contentWrapper.style.maxHeight = contentWrapper.scrollHeight + 'px'; // Expand to full height
+                });
+                header.classList.add('active-day');
+                chevron.classList.add('rotate-180');
+            }
+        }
+
+
         // Re-run addMobileDayCollapseListeners on resize in case user changes screen size
         window.addEventListener('resize', () => {
-            renderWeek(); // Rerender week to apply correct structure based on new screen size
+            // Re-render the entire week to ensure proper structure for the new screen size
+            renderWeek();
+            // Then apply the specific mobile collapse listeners if applicable
             addMobileDayCollapseListeners();
         });
 
@@ -1194,7 +1251,7 @@
             // Otherwise, shift only tasks from currentActiveTaskIndex onwards.
             const startIndex = (currentActiveTaskIndex === -1 || activeTimelineTasks[currentActiveTaskIndex].completed) ? 0 : currentActiveTaskIndex;
             
-            for (let i = 0; i < activeTimelineTasks.length; i++) {
+            for (let i = startIndex; i < activeTimelineTasks.length; i++) {
                 // Shift only tasks that haven't been completed yet or are the current active task
                 if (!activeTimelineTasks[i].completed || i === currentActiveTaskIndex) {
                     activeTimelineTasks[i].startTime.setTime(activeTimelineTasks[i].startTime.getTime() + breakDuration);
