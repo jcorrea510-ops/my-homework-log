@@ -948,15 +948,13 @@
             const tasksToSave = Array.from(tasksToSaveMap.values());
             console.log("updateTonightSchedule: Tasks to save:", JSON.stringify(tasksToSave));
 
-            // 4. Update the `deletedTaskIds` list
-            let newDeletedTaskIds = [...currentDeletedTaskIdsInDB];
-
-            // Remove any IDs from `newDeletedTaskIds` if they are now present in `hwTasksFromCalendar`
-            // (meaning they were "undeleted" by being re-entered in the calendar).
-            hwTasksFromCalendar.forEach(hwTask => {
-                newDeletedTaskIds = newDeletedTaskIds.filter(id => id !== hwTask.id);
-            });
-            console.log("updateTonightSchedule: New deletedTaskIds before saving:", JSON.stringify(newDeletedTaskIds));
+            // 4. deletedTaskIds: No automatic undeletion here.
+            // The deletedTaskIds list is ONLY modified when:
+            //   a) A task is deleted from the schedule (via trash icon)
+            //   b) A homework task is *re-typed* into the calendar input field (handled in saveHomework)
+            // So, simply pass along the currentDeletedTaskIdsInDB.
+            const newDeletedTaskIds = [...currentDeletedTaskIdsInDB]; // Maintain existing deleted IDs
+            console.log("updateTonightSchedule: Final deletedTaskIds for saving:", JSON.stringify(newDeletedTaskIds));
 
             // 5. Save the updated tasks and deleted IDs to Firestore
             await saveSchedule(tasksToSave, currentStartTime, newDeletedTaskIds);
@@ -964,6 +962,8 @@
 
         /**
          * Saves homework data for a specific date and class.
+         * This function also handles "undeleting" a homework task from the schedule
+         * if its input field is re-populated in the calendar.
          * @param {string} date - The date (YYYY-MM-DD).
          * @param {string} className - The class name (e.g., "Math").
          * @param {string} value - The homework assignment description.
@@ -976,14 +976,40 @@
                 localHomeworkData[date][className] = value;
             } else {
                 try {
-                    console.log("saveHomework: Saving to Firestore.");
+                    console.log("saveHomework: Saving homework to Firestore collection 'homework'.");
                     const docRef = doc(db, `artifacts/${effectiveAppId}/users/${userId}/homework`, date);
                     await setDoc(docRef, { [className]: value }, { merge: true }); 
-                    console.log("saveHomework: Successfully saved to Firestore.");
+                    console.log("saveHomework: Successfully saved to 'homework' collection.");
+
+                    // Now, handle the undeletion logic for the schedule document
+                    const todayDate = formatDate(new Date());
+                    const scheduleDocRef = doc(db, `artifacts/${effectiveAppId}/users/${userId}/schedules`, todayDate);
+                    const scheduleDocSnap = await getDoc(scheduleDocRef);
+
+                    let currentScheduleTasks = scheduleDocSnap.exists() ? scheduleDocSnap.data().tasks || [] : [];
+                    let currentDeletedTaskIds = scheduleDocSnap.exists() ? scheduleDocSnap.data().deletedTaskIds || [] : [];
+                    let currentStartTime = scheduleDocSnap.exists() ? scheduleDocSnap.data().startTime || '' : '';
+
+                    const homeworkTaskId = `hw-${date}-${className}`;
+
+                    // If the homework input is NOT empty and this task ID is currently marked as deleted
+                    if (value.trim() !== '' && currentDeletedTaskIds.includes(homeworkTaskId)) {
+                        currentDeletedTaskIds = currentDeletedTaskIds.filter(id => id !== homeworkTaskId);
+                        console.log(`saveHomework: Undeleting task ${homeworkTaskId}. New deletedTaskIds: ${JSON.stringify(currentDeletedTaskIds)}`);
+                        
+                        // We need to ensure the task itself is present in currentScheduleTasks if it wasn't already.
+                        // updateTonightSchedule will handle the full merging, but for this specific save,
+                        // we just need to update the deletedTaskIds of the current schedule.
+                        // The actual task list 'tasks' will be fully reconciled by the subsequent onSnapshot trigger.
+                        await setDoc(scheduleDocRef, { deletedTaskIds: currentDeletedTaskIds }, { merge: true });
+                        console.log("saveHomework: Successfully updated deletedTaskIds in schedule document.");
+                    }
+
                 } catch (error) {
-                    console.error("Error saving homework: ", error);
+                    console.error("Error saving homework or updating schedule deleted status: ", error);
                 }
             }
+            // Trigger updateTonightSchedule whether local or Firebase, to ensure UI sync
             if (date === formatDate(getTomorrowDate())) {
                 updateTonightSchedule();
             }
