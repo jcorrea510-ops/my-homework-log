@@ -693,6 +693,7 @@
                 inputContainer.innerHTML = `
                     <label class="font-medium text-sm text-gray-700 w-16 text-right flex-shrink-0">${name}:</label>
                     <input type="text" id="hw-${dateString}-${name}" data-date="${dateString}" data-class="${name}" class="class-input" placeholder="Assignment...">
+                    <button type="button" class="undelete-from-calendar-btn hidden text-gray-400 hover:text-indigo-600 focus:outline-none text-lg" data-task-id="hw-${dateString}-${name}" title="Restore deleted task"><i class="fas fa-undo"></i></button>
                 `;
                 contentWrapper.appendChild(inputContainer);
             });
@@ -837,9 +838,14 @@
                     console.log("onSnapshot(schedule): Fetched deletedTaskIds:", JSON.stringify(data.deletedTaskIds || []));
                     renderScheduleList(data.tasks || [], data.deletedTaskIds || []);
                     if(data.startTime) document.getElementById('start-time').value = data.startTime; 
+
+                    // After schedule renders, update calendar indicators
+                    updateCalendarDeletedIndicators(data.deletedTaskIds || []);
+
                 } else {
                     console.log("onSnapshot(schedule): Document does not exist, rendering empty list.");
                     renderScheduleList([]); // If no doc, render empty list
+                    updateCalendarDeletedIndicators([]); // Clear indicators if no schedule
                 }
             }, (error) => {
                 console.error("Error fetching schedule: ", error);
@@ -1104,17 +1110,36 @@
         }
 
         /**
-         * Calculates and displays the total estimated time for all non-deferred tasks in the schedule.
+         * Calculates and displays the total estimated time for all non-deferred and non-deleted tasks in the schedule.
          */
         async function updateTotalTime() { // Made async
             const tasks = await getCurrentScheduleTasksFromFirestore(); // Await the promise
+            // Fetch deletedTaskIds for the current day's schedule.
+            let deletedTaskIds = [];
+            const todayDate = formatDate(new Date());
+            if (db && auth && isAuthReady && userId) {
+                const scheduleDocRef = doc(db, `artifacts/${effectiveAppId}/users/${userId}/schedules`, todayDate);
+                try {
+                    const docSnap = await getDoc(scheduleDocRef);
+                    if (docSnap.exists()) {
+                        deletedTaskIds = docSnap.data().deletedTaskIds || [];
+                    }
+                } catch (error) {
+                    console.error("updateTotalTime: Error fetching deletedTaskIds:", error);
+                }
+            }
+            
             // Ensure tasks is an array before calling filter and reduce
             if (!Array.isArray(tasks)) {
                 console.error("updateTotalTime: tasks is not an array:", tasks);
                 totalTimeDisplay.textContent = 'Total Time: Error';
                 return;
             }
-            const totalMinutes = tasks.filter(task => !task.isDeferred).reduce((sum, task) => sum + (task.time || 0), 0); 
+
+            // Filter out tasks that are deferred OR deleted
+            const activeTasks = tasks.filter(task => !task.isDeferred && !deletedTaskIds.includes(task.id));
+            
+            const totalMinutes = activeTasks.reduce((sum, task) => sum + (task.time || 0), 0); 
             if (totalMinutes === 0) {
                 totalTimeDisplay.textContent = 'Total Time: 0m';
                 console.log("updateTotalTime: Total Time: 0m"); // Added log
@@ -1157,7 +1182,22 @@
 
             // Filter out deferred tasks for timeline generation
             const allScheduleTasks = await getCurrentScheduleTasksFromFirestore(); // Await the promise
-            const tasksForTimeline = allScheduleTasks.filter(task => !task.isDeferred);
+            // Also need to consider deleted tasks for timeline generation, as they shouldn't appear
+            let deletedTaskIds = [];
+            const todayDate = formatDate(new Date());
+            if (db && auth && isAuthReady && userId) {
+                const scheduleDocRef = doc(db, `artifacts/${effectiveAppId}/users/${userId}/schedules`, todayDate);
+                try {
+                    const docSnap = await getDoc(scheduleDocRef);
+                    if (docSnap.exists()) {
+                        deletedTaskIds = docSnap.data().deletedTaskIds || [];
+                    }
+                } catch (error) {
+                    console.error("generateTimeline: Error fetching deletedTaskIds:", error);
+                }
+            }
+
+            const tasksForTimeline = allScheduleTasks.filter(task => !task.isDeferred && !deletedTaskIds.includes(task.id));
 
             if(tasksForTimeline.length === 0) {
                  timelineOutput.innerHTML += `<p class="text-gray-500">No tasks to schedule. Add some above!</p>`;
@@ -1197,19 +1237,13 @@
             
             // Save the current schedule tasks (including deferred ones, but excluding deleted ones)
             // with the current start time.
-            const todayDate = formatDate(new Date());
             if (db && auth && isAuthReady && userId) {
-                const scheduleDocRef = doc(db, `artifacts/${effectiveAppId}/users/${userId}/schedules`, todayDate);
-                getDoc(scheduleDocRef).then(docSnap => {
-                    const existingDeletedTaskIds = docSnap.exists() ? docSnap.data().deletedTaskIds || [] : [];
-                    // Pass allScheduleTasks (which includes deferred)
-                    saveSchedule(allScheduleTasks, startTimeValue, existingDeletedTaskIds);
-                }).catch(error => {
-                    console.error("Error fetching existing deletedTaskIds for generateTimeline:", error);
-                    saveSchedule(allScheduleTasks, startTimeValue);
-                });
+                // `allScheduleTasks` already contains the latest state, including deferred and non-deferred
+                // We just need to pass the current deletedTaskIds, which we already fetched.
+                saveSchedule(allScheduleTasks, startTimeValue, deletedTaskIds);
             } else {
-                saveSchedule(allScheduleTasks, startTimeValue);
+                // Fallback for local, does not handle deleted state
+                saveSchedule(allScheduleTasks.filter(task => !task.isDeferred), startTimeValue);
             }
             startNextAvailableTimer(); // Start the timer for the first task
         }
@@ -1477,6 +1511,7 @@
                         tasks[taskIndex].isDeferred = isDeferred;
                         // If a task is deferred, it shouldn't be in the deleted list
                         // This prevents conflicts between deferred and deleted states.
+                        // Ensure it's not marked as deleted if deferred
                         tasks[taskIndex].isDeleted = false; 
 
                         console.log(`toggleDeferredStatus: Updated task ${taskId} in local array. New state: ${JSON.stringify(tasks[taskIndex])}`);
@@ -1495,6 +1530,74 @@
                 }
             } catch (error) {
                 console.error("Error toggling deferred status: ", error);
+            }
+        }
+
+        /**
+         * Updates the visibility of "undelete" icons in the calendar grid.
+         * @param {Array<string>} deletedTaskIds - The array of task IDs currently marked as deleted.
+         */
+        function updateCalendarDeletedIndicators(deletedTaskIds) {
+            console.log("updateCalendarDeletedIndicators: Running. Deleted IDs:", JSON.stringify(deletedTaskIds));
+            // Get all undelete buttons in the calendar
+            const undeleteButtons = calendarGrid.querySelectorAll('.undelete-from-calendar-btn');
+
+            undeleteButtons.forEach(button => {
+                const taskId = button.dataset.taskId;
+                // Check if this task ID is in the deletedTaskIds list
+                if (deletedTaskIds.includes(taskId)) {
+                    button.classList.remove('hidden');
+                } else {
+                    button.classList.add('hidden');
+                }
+            });
+        }
+
+        /**
+         * Undeletes a task from the current day's schedule by removing it from the deletedTaskIds array.
+         * @param {string} taskId - The ID of the task to undelete.
+         */
+        async function undeleteTaskFromSchedule(taskId) {
+            console.log(`undeleteTaskFromSchedule: Attempting to undelete task: ${taskId}`);
+            if (!db || !auth || !isAuthReady || !userId) {
+                console.warn("undeleteTaskFromSchedule: Firebase not ready. Cannot undelete.");
+                return;
+            }
+
+            const todayDate = formatDate(new Date());
+            const scheduleDocRef = doc(db, `artifacts/${effectiveAppId}/users/${userId}/schedules`, todayDate);
+
+            try {
+                const docSnap = await getDoc(scheduleDocRef);
+                if (docSnap.exists()) {
+                    let tasks = docSnap.data().tasks || [];
+                    let currentDeletedTaskIds = docSnap.data().deletedTaskIds || [];
+                    let currentStartTime = docSnap.data().startTime || '';
+
+                    // Remove taskId from deletedTaskIds
+                    const updatedDeletedTaskIds = currentDeletedTaskIds.filter(id => id !== taskId);
+                    
+                    // Also ensure the task itself is not marked as deferred if it's being undeleted
+                    const taskIndex = tasks.findIndex(t => t.id === taskId);
+                    if (taskIndex !== -1) {
+                        tasks[taskIndex].isDeferred = false; // Undeleted means it's active now
+                        console.log(`undeleteTaskFromSchedule: Set task ${taskId} to isDeferred: false.`);
+                    } else {
+                        // If the task wasn't in the tasks array, it might be a new homework from calendar.
+                        // updateTonightSchedule will handle re-adding it if it's fresh homework.
+                        // For a custom task that was deleted, it would usually stay in `tasks` but be hidden.
+                        // This case is for homework tasks that were deleted AND their input was cleared.
+                        // The primary role here is to remove from `deletedTaskIds`.
+                        console.warn(`undeleteTaskFromSchedule: Task ${taskId} not found in tasks array, but proceeding with deletedTaskIds update.`);
+                    }
+
+                    await saveSchedule(tasks, currentStartTime, updatedDeletedTaskIds);
+                    console.log(`undeleteTaskFromSchedule: Successfully removed ${taskId} from deletedTaskIds.`);
+                } else {
+                    console.warn(`undeleteTaskFromSchedule: Schedule document for ${todayDate} does not exist. Cannot undelete.`);
+                }
+            } catch (error) {
+                console.error("Error during undeleteTaskFromSchedule:", error);
             }
         }
 
@@ -1667,6 +1770,17 @@
         startBreakBtn.addEventListener('click', startBreak);
         endBreakBtn.addEventListener('click', endBreak);
 
+        // Calendar Undelete button click
+        calendarGrid.addEventListener('click', async (e) => {
+            const undeleteBtn = e.target.closest('.undelete-from-calendar-btn');
+            if (undeleteBtn) {
+                console.log("Event: Calendar undelete button clicked.");
+                const taskId = undeleteBtn.dataset.taskId;
+                if (taskId) {
+                    await undeleteTaskFromSchedule(taskId);
+                }
+            }
+        });
 
         // --- Drag and Drop Logic for Schedule Items ---
         let draggedItem = null; 
