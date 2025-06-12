@@ -912,7 +912,7 @@
 
             let newTasksMap = new Map();
 
-            // 1. Add existing active tasks from today's schedule (those not marked deleted)
+            // 1. Add existing tasks from today's schedule. Only include if not in activelyDeletedIds.
             currentTasksInDBForToday.forEach(task => {
                 if (!activelyDeletedIds.has(task.id)) {
                     newTasksMap.set(task.id, task);
@@ -922,7 +922,9 @@
 
 
             // 2. Get homework from calendar (due for tomorrow)
-            // Only add homework if it exists in the homework document AND is not currently marked as deleted in the schedule.
+            // This section should ONLY add tasks that are present in the homework document
+            // AND are NOT currently marked as deleted in the schedule document.
+            // It should NOT modify activelyDeletedIds. That's `saveHomework`'s job.
             if (db && auth && isAuthReady && userId) {
                 const hwDocRef = doc(db, `artifacts/${effectiveAppId}/users/${userId}/homework`, tomorrowDateString);
                 const hwDocSnap = await getDoc(hwDocRef);
@@ -932,23 +934,26 @@
                         const homeworkText = data[name] ? data[name].trim() : '';
                         const hwId = `hw-${tomorrowDateString}-${name}`;
 
-                        // Add homework to newTasksMap only if it has text AND is not in the activelyDeletedIds set
+                        // Only add if homework text exists AND the task ID is NOT in the actively deleted list
+                        // The 'activelyDeletedIds' set is sourced from the schedule document at the start of this function.
                         if (homeworkText !== '' && !activelyDeletedIds.has(hwId)) {
-                            newTasksMap.set(hwId, { // Add or update in map
-                                ...newTasksMap.get(hwId), // Preserve existing properties like time if available
-                                id: hwId,
-                                text: `${name}: ${homeworkText}`,
-                                hwClass: name,
-                                time: 30, // Default time
-                                isDeferred: false // Homework from calendar is always not deferred initially
-                            });
+                            // Ensure the task is not already in newTasksMap with different properties
+                            // If it's already there (e.g. from deferred), ensure we prioritize the homework entry.
+                            const existingTask = newTasksMap.get(hwId);
+                            if (!existingTask || existingTask.isDeferred) { // If not existing or was deferred, update/add
+                                newTasksMap.set(hwId, {
+                                    id: hwId,
+                                    text: `${name}: ${homeworkText}`,
+                                    hwClass: name,
+                                    time: existingTask ? existingTask.time : 30, // Preserve time if already existing
+                                    isDeferred: false // Coming from calendar, it's now due
+                                });
+                            }
                         }
-                        // Note: This function does NOT add/remove from activelyDeletedIds here.
-                        // That is the sole responsibility of saveHomework.
                     });
                 }
             }
-            console.log("updateTonightSchedule: After adding Homework Due Tomorrow (only if not deleted):", JSON.stringify(Array.from(newTasksMap.values())));
+            console.log("updateTonightSchedule: After considering Homework Due Tomorrow (only if not deleted and not already existing active):", JSON.stringify(Array.from(newTasksMap.values())));
 
 
             // 3. Get deferred tasks from YESTERDAY's schedule (these are now due today)
