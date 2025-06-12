@@ -850,12 +850,15 @@
                     renderScheduleList(data.tasks || [], data.deletedTaskIds || []);
                     if(data.startTime) document.getElementById('start-time').value = data.startTime; 
 
-                    // After schedule renders, update calendar indicators
+                    // Before calling updateCalendarTaskIndicators, log the precise inputs
+                    console.log("DEBUG: Calling updateCalendarTaskIndicators with allTasks:", JSON.stringify(data.tasks || []), "and deletedTaskIds:", JSON.stringify(data.deletedTaskIds || []));
                     updateCalendarTaskIndicators(data.tasks || [], data.deletedTaskIds || []);
 
                 } else {
                     console.log("onSnapshot(schedule): Document does not exist, rendering empty list.");
                     renderScheduleList([]); // If no doc, render empty list
+                    // Before calling updateCalendarTaskIndicators, log the precise inputs for empty case
+                    console.log("DEBUG: Calling updateCalendarTaskIndicators with empty arrays (doc not exists).");
                     updateCalendarTaskIndicators([], []); // Clear indicators if no schedule
                 }
             }, (error) => {
@@ -922,7 +925,23 @@
             console.log("updateTonightSchedule: Fetched current schedule data - Tasks:", JSON.stringify(currentTasksInDBForToday), "Deleted IDs:", JSON.stringify(currentDeletedTaskIdsInDBForToday));
 
             let newTasksMap = new Map();
-            let newDeletedTaskIds = new Set(currentDeletedTaskIdsInDBForToday); // Initialize with existing deleted IDs
+            let newDeletedTaskIds = new Set(); // Start with a fresh set for deleted IDs
+
+            // Initialize newDeletedTaskIds: Only keep custom tasks and relevant tomorrow's homework IDs
+            // from the current schedule's deletedTaskIds. Filter out old homework IDs.
+            currentDeletedTaskIdsInDBForToday.forEach(id => {
+                if (id.startsWith('task-custom-')) {
+                    newDeletedTaskIds.add(id);
+                } else if (id.startsWith('hw-')) {
+                    const taskIdParts = id.split('-');
+                    const taskDateString = `${taskIdParts[1]}-${taskIdParts[2]}-${taskIdParts[3]}`;
+                    if (taskDateString === tomorrowDateString) { // Only keep if it's explicitly for tomorrow's homework
+                        newDeletedTaskIds.add(id);
+                    }
+                }
+            });
+            console.log("updateTonightSchedule: Initial newDeletedTaskIds after cleaning historical homework IDs:", JSON.stringify(Array.from(newDeletedTaskIds)));
+
 
             // Add existing tasks from today's schedule first, but don't filter them out yet.
             // We want to preserve their properties (time, isDeferred) even if they are currently "deleted"
@@ -958,8 +977,8 @@
                     newDeletedTaskIds.add(hwId);
                     // Also, remove it from newTasksMap if it was there and is now empty
                     if (newTasksMap.has(hwId)) {
-                        newTasksMap.delete(hwId);
-                        console.log(`updateTonightSchedule: Removed empty homework task ${hwId} from newTasksMap and added to newDeletedTaskIds.`);
+                        newTasksMap.delete(hwId); // Remove from active tasks map
+                        console.log(`updateTonightSchedule: Removed empty homework task ${hwId} from newTasksMap.`);
                     } else {
                         console.log(`updateTonightSchedule: Homework for ${hwId} is empty. Added to newDeletedTaskIds.`);
                     }
@@ -1040,7 +1059,10 @@
             console.log("updateTonightSchedule: Final ordered tasks for saving:", JSON.stringify(orderedFinalTasks));
 
             // --- 5. Save the final schedule data for TODAY ---
-            await saveSchedule(orderedFinalTasks, currentStartTime, Array.from(newDeletedTaskIds));
+            const finalDeletedTaskIdsArray = Array.from(newDeletedTaskIds); // Ensure we save the filtered set
+            console.log("DEBUG: updateTonightSchedule - Final tasks to save:", JSON.stringify(orderedFinalTasks));
+            console.log("DEBUG: updateTonightSchedule - Final deletedTaskIds to save:", JSON.stringify(finalDeletedTaskIdsArray));
+            await saveSchedule(orderedFinalTasks, currentStartTime, finalDeletedTaskIdsArray);
             console.log("updateTonightSchedule: Finished saving schedule data.");
         }
 
@@ -1529,13 +1551,7 @@
 
                     if (taskIndex !== -1) {
                         tasks[taskIndex].isDeferred = isDeferred;
-                        // If a task is deferred, it shouldn't be in the deleted list
-                        // This prevents conflicts between deferred and deleted states.
-                        // However, a task might be both deferred AND deleted by clearing calendar input.
-                        // The primary filter is `deletedTaskIds` in `renderScheduleList`
-                        // and the explicit deletion from the list itself.
-                        // `updateTonightSchedule` ensures that if a task is deferred, its calendar entry is probably not empty.
-                        // For now, if deferred, remove from deletedTaskIds
+                        // If a task is deferred, it should generally not be considered "deleted" from the schedule list for rendering
                         if (isDeferred && currentDeletedTaskIds.includes(taskId)) {
                              currentDeletedTaskIds = currentDeletedTaskIds.filter(id => id !== taskId);
                              console.log(`toggleDeferredStatus: Removed ${taskId} from deletedTaskIds because it's now deferred.`);
@@ -1564,30 +1580,59 @@
         function updateCalendarTaskIndicators(allTasks, deletedTaskIds) {
             console.log("updateCalendarTaskIndicators: Running. All Tasks:", allTasks, "Deleted IDs:", deletedTaskIds);
             const restoreButtons = calendarGrid.querySelectorAll('.undelete-from-calendar-btn');
+            const tomorrowDateString = formatDate(getTomorrowDate());
 
             restoreButtons.forEach(button => {
                 const taskId = button.dataset.taskId; // e.g., 'hw-2025-06-12-Math'
+                // Extract date from taskId to know which day it belongs to
+                const taskIdParts = taskId.split('-');
+                const taskDateString = `${taskIdParts[1]}-${taskIdParts[2]}-${taskIdParts[3]}`; // YYYY-MM-DD
+                
+                // An undo button should only appear if the task is either:
+                // 1. Explicitly deleted from today's schedule (tracked in deletedTaskIds)
+                // 2. Deferred from today's schedule (tracked in allTasks with isDeferred: true)
+                // AND it's a homework task for tomorrow or a custom task.
+                // Or if it's a homework task for a *past* or *future* day that was part of the schedule and then deleted/deferred.
 
-                const isDeleted = deletedTaskIds.includes(taskId);
-                const isDeferred = allTasks.some(task => task.id === taskId && task.isDeferred);
+                // Refined logic:
+                // Is this task ID in the current schedule's deletedTaskIds (meaning it was removed from tonight's schedule)?
+                const isDeletedFromSchedule = deletedTaskIds.includes(taskId);
+                
+                // Is this task ID currently in the schedule and marked as deferred?
+                const isDeferredInSchedule = allTasks.some(task => task.id === taskId && task.isDeferred);
 
-                if (isDeleted || isDeferred) {
-                    button.classList.remove('hidden');
-                    // Store which action the button should perform when clicked
-                    if (isDeleted) {
-                        button.dataset.action = 'undelete';
-                        button.title = 'Restore deleted homework';
-                        console.log(`updateCalendarTaskIndicators: Undo icon for ${taskId} visible (deleted).`);
-                    } else if (isDeferred) { // Must be deferred if not deleted but condition is true
-                        button.dataset.action = 'undefer';
-                        button.title = 'Bring this homework back to tonight\'s schedule';
-                        console.log(`updateCalendarTaskIndicators: Undo icon for ${taskId} visible (deferred).`);
+                // Check the original homework input value
+                const inputElement = document.getElementById(taskId);
+                const homeworkInputValue = inputElement ? inputElement.value.trim() : '';
+
+                // The undo button should be visible if it was deleted OR deferred from the *current* schedule,
+                // AND its associated calendar input is currently empty (if it's a homework task).
+                // This prevents the undo button showing if the homework has already been re-entered.
+
+                if (isDeletedFromSchedule || isDeferredInSchedule) {
+                     // If it's a homework task and its input is now filled, hide the undo button
+                    if (taskId.startsWith('hw-') && homeworkInputValue !== '') {
+                        button.classList.add('hidden');
+                        button.dataset.action = '';
+                        button.title = '';
+                        // console.log(`updateCalendarTaskIndicators: Hiding undo for ${taskId} (was deleted/deferred, but input is now filled).`);
+                    } else {
+                        button.classList.remove('hidden');
+                        if (isDeletedFromSchedule) {
+                            button.dataset.action = 'undelete';
+                            button.title = 'Restore deleted homework (clear input to hide)';
+                            // console.log(`updateCalendarTaskIndicators: Showing undo for ${taskId} (deleted from schedule).`);
+                        } else if (isDeferredInSchedule) {
+                            button.dataset.action = 'undefer';
+                            button.title = 'Bring this homework back to tonight\'s schedule (clear input to hide)';
+                            // console.log(`updateCalendarTaskIndicators: Showing undo for ${taskId} (deferred in schedule).`);
+                        }
                     }
                 } else {
                     button.classList.add('hidden');
                     button.dataset.action = ''; // Clear action
                     button.title = '';
-                    console.log(`updateCalendarTaskIndicators: Undo icon for ${taskId} hidden (not deleted/deferred).`);
+                    // console.log(`updateCalendarTaskIndicators: Hiding undo for ${taskId} (not deleted/deferred from schedule).`);
                 }
             });
         }
@@ -1619,7 +1664,6 @@
 
                     let taskModified = false; 
 
-                    // Handle undelete action
                     if (actionType === 'undelete') {
                         const initialDeletedCount = currentDeletedTaskIds.length;
                         currentDeletedTaskIds = currentDeletedTaskIds.filter(id => id !== taskId);
@@ -1629,7 +1673,6 @@
                         }
                     }
                     
-                    // Handle undefer action AND ensure task is re-added if it was only implicitly deleted
                     const taskIndex = tasks.findIndex(t => t.id === taskId);
                     if (taskIndex !== -1) {
                         if (tasks[taskIndex].isDeferred && actionType === 'undefer') {
@@ -1639,11 +1682,9 @@
                         }
                         // If the task exists in the schedule and was removed from deletedTaskIds
                         // (either by this action or another), ensure its `isDeleted` flag (if any) is reset.
-                        if (tasks[taskIndex].isDeleted) { // This `isDeleted` property on the task itself is redundant but harmless
-                            tasks[taskIndex].isDeleted = false;
-                            taskModified = true;
-                            console.log(`restoreTaskFromCalendar: Set task ${taskId} to isDeleted: false.`);
-                        }
+                        // The isDeleted property on the task object itself is not used for logic,
+                        // but rather the presence in the deletedTaskIds array.
+                        // Removed `tasks[taskIndex].isDeleted = false;` as it's not used.
 
                     } else {
                         // If task is NOT in current tasks list (e.g., was deleted entirely or never added)
