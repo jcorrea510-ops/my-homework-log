@@ -992,52 +992,99 @@
                 console.warn("saveHomework: Firebase not ready or user not logged in, saving to local memory.");
                 if (!localHomeworkData[date]) localHomeworkData[date] = {};
                 localHomeworkData[date][className] = value;
-            } else {
-                try {
-                    console.log("saveHomework: Saving homework to Firestore collection 'homework'.");
-                    const docRef = doc(db, `artifacts/${effectiveAppId}/users/${userId}/homework`, date);
-                    await setDoc(docRef, { [className]: value }, { merge: true }); 
-                    console.log("saveHomework: Successfully saved to 'homework' collection.");
-
-                    // Now, handle the undeletion and undeferral logic for the schedule document
-                    const todayDate = formatDate(new Date());
-                    const scheduleDocRef = doc(db, `artifacts/${effectiveAppId}/users/${userId}/schedules`, todayDate);
-                    const scheduleDocSnap = await getDoc(scheduleDocRef);
-
-                    let currentScheduleTasks = scheduleDocSnap.exists() ? docSnap.data().tasks || [] : [];
-                    let currentDeletedTaskIds = scheduleDocSnap.exists() ? docSnap.data().deletedTaskIds || [] : [];
-                    let currentStartTime = scheduleDocSnap.exists() ? docSnap.data().startTime || '' : '';
-
-                    const homeworkTaskId = `hw-${date}-${className}`;
-
-                    let taskModified = false;
-
-                    // Undelete logic: If the homework input is NOT empty and this task ID is currently marked as deleted
-                    if (value.trim() !== '' && currentDeletedTaskIds.includes(homeworkTaskId)) {
-                        currentDeletedTaskIds = currentDeletedTaskIds.filter(id => id !== homeworkTaskId);
-                        console.log(`saveHomework: Undeleting task ${homeworkTaskId}. New deletedTaskIds: ${JSON.stringify(currentDeletedTaskIds)}`);
-                        taskModified = true;
-                    }
-
-                    // Undeferral logic: If the homework input is NOT empty and this task was previously deferred
-                    const existingTaskInSchedule = currentScheduleTasks.find(task => task.id === homeworkTaskId);
-                    if (value.trim() !== '' && existingTaskInSchedule && existingTaskInSchedule.isDeferred) {
-                        existingTaskInSchedule.isDeferred = false; // Mark it as not deferred
-                        console.log(`saveHomework: Undeferring task ${homeworkTaskId}. Task isDeferred set to false.`);
-                        taskModified = true;
-                    }
-
-                    if (taskModified) {
-                        // Save the modified schedule document (tasks and deletedTaskIds)
-                        await setDoc(scheduleDocRef, { tasks: currentScheduleTasks, deletedTaskIds: currentDeletedTaskIds }, { merge: true });
-                        console.log("saveHomework: Successfully updated schedule document with undelete/undefer changes.");
-                    }
-
-                } catch (error) {
-                    console.error("Error saving homework or updating schedule deleted status: ", error);
+                // Even for local, if input is cleared, trigger a refresh of schedule based on this.
+                if (date === formatDate(getTomorrowDate())) {
+                    updateTonightSchedule();
                 }
+                return;
             }
-            // Trigger updateTonightSchedule whether local or Firebase, to ensure UI sync
+
+            try {
+                console.log("saveHomework: Saving homework to Firestore collection 'homework'.");
+                const docRef = doc(db, `artifacts/${effectiveAppId}/users/${userId}/homework`, date);
+                await setDoc(docRef, { [className]: value }, { merge: true }); 
+                console.log("saveHomework: Successfully saved to 'homework' collection.");
+
+                // Now, handle the schedule document update
+                const todayDate = formatDate(new Date());
+                const scheduleDocRef = doc(db, `artifacts/${effectiveAppId}/users/${userId}/schedules`, todayDate);
+                const scheduleDocSnap = await getDoc(scheduleDocRef);
+
+                let currentScheduleTasks = scheduleDocSnap.exists() ? scheduleDocSnap.data().tasks || [] : [];
+                let currentDeletedTaskIds = scheduleDocSnap.exists() ? scheduleDocSnap.data().deletedTaskIds || [] : [];
+                let currentStartTime = scheduleDocSnap.exists() ? scheduleDocSnap.data().startTime || '' : '';
+
+                const homeworkTaskId = `hw-${date}-${className}`;
+                let taskModified = false;
+
+                // Find if this specific homework task exists in the current tasks list for today
+                const existingTaskInScheduleIndex = currentScheduleTasks.findIndex(task => task.id === homeworkTaskId);
+
+                if (value.trim() === '') { // Input field is cleared (delete action)
+                    console.log(`saveHomework: Homework input for ${homeworkTaskId} is empty. Treating as deletion.`);
+                    // Add to deletedTaskIds if not already there
+                    if (!currentDeletedTaskIds.includes(homeworkTaskId)) {
+                        currentDeletedTaskIds.push(homeworkTaskId);
+                        taskModified = true;
+                        console.log(`saveHomework: Added ${homeworkTaskId} to deletedTaskIds.`);
+                    }
+
+                    // If task exists in tasks array, ensure it's not deferred (it's now deleted)
+                    if (existingTaskInScheduleIndex !== -1) {
+                        if (currentScheduleTasks[existingTaskInScheduleIndex].isDeferred) {
+                            currentScheduleTasks[existingTaskInScheduleIndex].isDeferred = false;
+                            taskModified = true;
+                            console.log(`saveHomework: Set isDeferred to false for ${homeworkTaskId} (was deferred).`);
+                        }
+                    }
+                } else { // Input field has a value (undelete/undefer action or new entry)
+                    // Undelete logic: Remove from deletedTaskIds if it was there
+                    if (currentDeletedTaskIds.includes(homeworkTaskId)) {
+                        currentDeletedTaskIds = currentDeletedTaskIds.filter(id => id !== homeworkTaskId);
+                        taskModified = true;
+                        console.log(`saveHomework: Removed ${homeworkTaskId} from deletedTaskIds.`);
+                    }
+
+                    // Undeferral/add logic:
+                    if (existingTaskInScheduleIndex !== -1) {
+                        // Task exists in schedule, update its properties if changed (e.g., undefer)
+                        if (currentScheduleTasks[existingTaskInScheduleIndex].isDeferred) {
+                            currentScheduleTasks[existingTaskInScheduleIndex].isDeferred = false;
+                            taskModified = true;
+                            console.log(`saveHomework: Set isDeferred to false for ${homeworkTaskId} (was deferred).`);
+                        }
+                        // Also update the text if it changed in the calendar
+                        if (currentScheduleTasks[existingTaskInScheduleIndex].text !== `${className}: ${value}`) {
+                            currentScheduleTasks[existingTaskInScheduleIndex].text = `${className}: ${value}`;
+                            taskModified = true;
+                            console.log(`saveHomework: Updated text for ${homeworkTaskId}.`);
+                        }
+                    } else {
+                        // Task doesn't exist in schedule, add it as a new active task
+                        const newTask = {
+                            id: homeworkTaskId,
+                            text: `${className}: ${value}`,
+                            hwClass: className,
+                            time: 30, // Default time
+                            isDeferred: false
+                        };
+                        currentScheduleTasks.push(newTask);
+                        taskModified = true;
+                        console.log(`saveHomework: Added new task ${homeworkTaskId} to schedule.`);
+                    }
+                }
+
+                if (taskModified) {
+                    // Save the modified schedule document
+                    await setDoc(scheduleDocRef, { tasks: currentScheduleTasks, deletedTaskIds: currentDeletedTaskIds }, { merge: true });
+                    console.log("saveHomework: Successfully updated schedule document based on homework input change.");
+                }
+
+            } catch (error) {
+                console.error("Error saving homework or updating schedule: ", error);
+            }
+            // Trigger updateTonightSchedule if the change is for "tomorrow's" homework,
+            // as that affects "Tonight's Schedule".
             if (date === formatDate(getTomorrowDate())) {
                 updateTonightSchedule();
             }
