@@ -904,12 +904,20 @@
             let currentDeletedTaskIdsInDBForToday = currentScheduleDataForToday.deletedTaskIds || [];
             let currentStartTime = currentScheduleDataForToday.startTime || '';
 
+            // Create a Set for quick lookup of deleted IDs, starting with existing ones.
+            let activelyDeletedIds = new Set(currentDeletedTaskIdsInDBForToday);
+
             // Use a Map to build the new list of tasks for TODAY's schedule, ensuring uniqueness and latest state
             let newTasksMap = new Map();
 
-            // Populate map with existing tasks for today, preserving their properties (including isDeferred)
-            currentTasksInDBForToday.forEach(task => newTasksMap.set(task.id, task));
-            console.log("updateTonightSchedule: Initial newTasksMap with ALL current tasks for today:", JSON.stringify(Array.from(newTasksMap.values())));
+            // Populate map with existing tasks from today's DB schedule, preserving their properties (including isDeferred).
+            // IMPORTANT: Only include tasks that are NOT currently marked as deleted in the database.
+            currentTasksInDBForToday.forEach(task => {
+                if (!activelyDeletedIds.has(task.id)) {
+                    newTasksMap.set(task.id, task);
+                }
+            });
+            console.log("updateTonightSchedule: Initial newTasksMap with active tasks from today's DB schedule:", JSON.stringify(Array.from(newTasksMap.values())));
 
 
             // --- 2. Get homework from calendar (due for tomorrow) ---
@@ -919,25 +927,40 @@
                 const hwDocSnap = await getDoc(hwDocRef);
                 if (hwDocSnap.exists()) {
                     const data = hwDocSnap.data();
-                    homeworkDueTomorrow = CLASS_NAMES.filter(name => data[name].trim() !== '').map(name => ({
-                        id: `hw-${tomorrowDateString}-${name}`, // Stable ID
-                        text: `${name}: ${data[name]}`,
-                        hwClass: name,
-                        time: 30, // Default time
-                        isDeferred: false // Homework from calendar is always not deferred initially
-                    }));
+                    CLASS_NAMES.forEach(name => {
+                        const homeworkText = data[name] ? data[name].trim() : '';
+                        const hwId = `hw-${tomorrowDateString}-${name}`;
+
+                        if (homeworkText !== '') {
+                            // If homework exists in calendar, it's NOT deleted, so remove from activelyDeletedIds
+                            activelyDeletedIds.delete(hwId);
+                            homeworkDueTomorrow.push({
+                                id: hwId, // Stable ID
+                                text: `${name}: ${homeworkText}`,
+                                hwClass: name,
+                                time: 30, // Default time
+                                isDeferred: false // Homework from calendar is always not deferred initially
+                            });
+                        } else {
+                            // If homework is cleared from calendar, it IS deleted, so add to activelyDeletedIds
+                            activelyDeletedIds.add(hwId);
+                        }
+                    });
                 }
             }
             // Add or update homework tasks from the calendar.
-            // If a homework task is re-added from the calendar, it takes precedence for today.
             homeworkDueTomorrow.forEach(hwTask => {
-                newTasksMap.set(hwTask.id, {
-                    ...newTasksMap.get(hwTask.id), // Preserve existing properties like time if available
-                    ...hwTask, // Override with new hw details
-                    isDeferred: false // Explicitly mark as not deferred when coming from calendar
-                });
+                // Only add to map if not in activelyDeletedIds (which was updated by calendar clear/populate logic)
+                if (!activelyDeletedIds.has(hwTask.id)) {
+                    newTasksMap.set(hwTask.id, {
+                        ...newTasksMap.get(hwTask.id), // Preserve existing properties like time if available
+                        ...hwTask, // Override with new hw details
+                        isDeferred: false // Explicitly mark as not deferred when coming from calendar
+                    });
+                }
             });
-            console.log("updateTonightSchedule: After adding Homework Due Tomorrow (explicitly not deferred):", JSON.stringify(Array.from(newTasksMap.values())));
+            console.log("updateTonightSchedule: After adding Homework Due Tomorrow (explicitly not deferred, and actively deleted set updated based on calendar input):", JSON.stringify(Array.from(newTasksMap.values())));
+
 
             // --- 3. Get deferred tasks from YESTERDAY's schedule (these are now due today) ---
             let deferredTasksFromYesterday = [];
@@ -951,31 +974,50 @@
             }
             console.log("updateTonightSchedule: Deferred Tasks From Yesterday:", JSON.stringify(deferredTasksFromYesterday));
 
-            // Add deferred tasks from yesterday to today's schedule, clearing their `isDeferred` flag
+            // Add deferred tasks from yesterday to today's schedule, clearing their `isDeferred` flag.
+            // Ensure they are not also marked as deleted.
             deferredTasksFromYesterday.forEach(deferredTask => {
-                // Only add if not already present from homeworkDueTomorrow (which takes precedence for today)
-                if (!newTasksMap.has(deferredTask.id)) {
+                if (!newTasksMap.has(deferredTask.id) && !activelyDeletedIds.has(deferredTask.id)) {
                      newTasksMap.set(deferredTask.id, {
                          ...deferredTask,
                          isDeferred: false // It's now due
                      });
                 }
             });
-            console.log("updateTonightSchedule: After adding Deferred Tasks From Yesterday (now not deferred):", JSON.stringify(Array.from(newTasksMap.values())));
+            console.log("updateTonightSchedule: After adding Deferred Tasks From Yesterday (now not deferred and not actively deleted):", JSON.stringify(Array.from(newTasksMap.values())));
 
             // --- 4. Final list of tasks to save for TODAY's schedule ---
-            // This order matters for persistence.
-            const finalTasksToSave = Array.from(newTasksMap.values());
-            console.log("updateTonightSchedule: Final Tasks for Today's Schedule Document (all, including deferred):", JSON.stringify(finalTasksToSave));
+            // Preserve the order of tasks that were originally in the DB and are still active.
+            // Then append newly added tasks.
+            let orderedFinalTasks = [];
+            const orderedKeys = Array.from(newTasksMap.keys()); // Keep track of tasks added to map for final ordering.
 
-            // --- 5. Update deletedTaskIds for TODAY's schedule ---
-            // If a task appears in newTasksMap (i.e., it's present in the final list),
-            // it should *not* be in the `deletedTaskIds` list.
-            let updatedDeletedTaskIds = currentDeletedTaskIdsInDBForToday.filter(id => !newTasksMap.has(id));
-            console.log("updateTonightSchedule: Updated deletedTaskIds for saving:", JSON.stringify(updatedDeletedTaskIds));
+            // First, try to maintain the original order from currentTasksInDBForToday
+            currentTasksInDBForToday.forEach(task => {
+                if (newTasksMap.has(task.id)) {
+                    orderedFinalTasks.push(newTasksMap.get(task.id));
+                    newTasksMap.delete(task.id); // Remove from map as it's been added to ordered list
+                }
+            });
+
+            // Add any remaining tasks in the map (these are new entries or ones whose order wasn't preserved)
+            orderedFinalTasks = orderedFinalTasks.concat(Array.from(newTasksMap.values()));
+
+            console.log("updateTonightSchedule: Final Tasks for Today's Schedule Document (all, including deferred that are still in map):", JSON.stringify(orderedFinalTasks));
+
+
+            // --- 5. Finalize deletedTaskIds for TODAY's schedule ---
+            // The `activelyDeletedIds` Set now accurately reflects the state of deleted items.
+            // Ensure that any tasks that are now active/deferred (in `orderedFinalTasks`) are removed from this set
+            // if they were somehow still in `activelyDeletedIds` (shouldn't happen with the new logic, but as a safeguard).
+            let finalDeletedTaskIdsArray = Array.from(activelyDeletedIds).filter(id => {
+                return !orderedFinalTasks.some(task => task.id === id);
+            });
+            console.log("updateTonightSchedule: Final deletedTaskIds for saving:", JSON.stringify(finalDeletedTaskIdsArray));
+
 
             // --- 6. Save the final schedule data for TODAY ---
-            await saveSchedule(finalTasksToSave, currentStartTime, updatedDeletedTaskIds);
+            await saveSchedule(orderedFinalTasks, currentStartTime, finalDeletedTaskIdsArray);
         }
 
         /**
@@ -1645,8 +1687,8 @@
                             console.log(`restoreTaskFromCalendar: Set task ${taskId} to isDeferred: false.`);
                             taskModified = true;
                         }
-                        // Also ensure it's not deleted if it's being undeleted or undeferred via this button
-                        // This helps keep the task object itself consistent, though the deletedTaskIds array is primary.
+                        // If it's being restored, ensure it's not logically marked as deleted within the task object itself,
+                        // although the primary source is `deletedTaskIds` array.
                         if (tasks[taskIndex].isDeleted) { // Assuming 'isDeleted' might exist as a property on task objects
                             tasks[taskIndex].isDeleted = false;
                             taskModified = true;
@@ -1659,18 +1701,24 @@
                         const [type, date, className] = taskId.split('-');
                         if (type === 'hw' && date && className) {
                             const hwInput = document.getElementById(`hw-${date}-${className}`);
-                            if (hwInput && hwInput.value.trim() !== '') {
+                            // We need to fetch the actual homework text from the homework collection itself,
+                            // not rely on the current (potentially empty) input field.
+                            const hwDocRef = doc(db, `artifacts/${effectiveAppId}/users/${userId}/homework`, date);
+                            const hwSnapshot = await getDoc(hwDocRef);
+                            const homeworkTextFromDB = hwSnapshot.exists() ? hwSnapshot.data()[className] || '' : '';
+
+                            if (homeworkTextFromDB.trim() !== '') {
                                 tasks.push({
                                     id: taskId,
-                                    text: `${className}: ${hwInput.value}`,
+                                    text: `${className}: ${homeworkTextFromDB}`,
                                     hwClass: className,
                                     time: 30, // Default time
                                     isDeferred: false // It's being brought back, so it's not deferred.
                                 });
-                                console.log(`restoreTaskFromCalendar: Re-added homework task ${taskId} to tasks array as it was missing.`);
+                                console.log(`restoreTaskFromCalendar: Re-added homework task ${taskId} to tasks array as it was missing from calendar DB.`);
                                 taskModified = true;
                             } else {
-                                 console.warn(`restoreTaskFromCalendar: Homework input for ${taskId} is empty. Cannot restore.`);
+                                 console.warn(`restoreTaskFromCalendar: Cannot restore task ${taskId} from calendar, its homework input is empty in DB or doc not found.`);
                             }
                         } else {
                             console.warn(`restoreTaskFromCalendar: Task ${taskId} not found in tasks array and is not a recognizable homework ID. Cannot auto-add.`);
