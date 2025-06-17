@@ -1580,43 +1580,54 @@
         function updateCalendarTaskIndicators(allTasks, deletedTaskIds) {
             console.log("updateCalendarTaskIndicators: Running. All Tasks:", allTasks, "Deleted IDs:", deletedTaskIds);
             const restoreButtons = calendarGrid.querySelectorAll('.undelete-from-calendar-btn');
-            const tomorrowDateString = formatDate(getTomorrowDate());
+            const tomorrowDateString = formatDate(getTomorrowDate()); // Get tomorrow's date once
 
             restoreButtons.forEach(button => {
                 const taskId = button.dataset.taskId; // e.g., 'hw-2025-06-12-Math'
-                // Extract date from taskId to know which day it belongs to
                 const taskIdParts = taskId.split('-');
-                const taskDateString = `${taskIdParts[1]}-${taskIdParts[2]}-${taskIdParts[3]}`; // YYYY-MM-DD
+                const taskType = taskIdParts[0]; // 'hw' or 'task'
+                const taskDateString = taskIdParts[1] ? `${taskIdParts[1]}-${taskIdParts[2]}-${taskIdParts[3]}` : ''; // YYYY-MM-DD for hw tasks
                 
-                // An undo button should only appear if the task is either:
-                // 1. Explicitly deleted from today's schedule (tracked in deletedTaskIds)
-                // 2. Deferred from today's schedule (tracked in allTasks with isDeferred: true)
-                // AND it's a homework task for tomorrow or a custom task.
-                // Or if it's a homework task for a *past* or *future* day that was part of the schedule and then deleted/deferred.
+                // An undo button should only appear if the task is:
+                // 1. A homework task for tomorrow's date.
+                // AND
+                // 2. (It's explicitly deleted from tonight's schedule OR it's deferred from tonight's schedule)
+                // AND
+                // 3. The associated calendar input is currently empty.
 
-                // Refined logic:
+                // Is this button associated with "tomorrow's homework"?
+                const isTomorrowHomework = (taskType === 'hw' && taskDateString === tomorrowDateString);
+                
+                // If it's not tomorrow's homework, hide it immediately.
+                if (!isTomorrowHomework) {
+                    button.classList.add('hidden');
+                    button.dataset.action = '';
+                    button.title = '';
+                    // console.log(`updateCalendarTaskIndicators: Hiding undo for ${taskId} (not tomorrow's homework).`);
+                    return; // Skip further checks for this button
+                }
+                
                 // Is this task ID in the current schedule's deletedTaskIds (meaning it was removed from tonight's schedule)?
                 const isDeletedFromSchedule = deletedTaskIds.includes(taskId);
                 
                 // Is this task ID currently in the schedule and marked as deferred?
                 const isDeferredInSchedule = allTasks.some(task => task.id === taskId && task.isDeferred);
 
-                // Check the original homework input value
+                // Check the current homework input value in the calendar
                 const inputElement = document.getElementById(taskId);
                 const homeworkInputValue = inputElement ? inputElement.value.trim() : '';
 
-                // The undo button should be visible if it was deleted OR deferred from the *current* schedule,
-                // AND its associated calendar input is currently empty (if it's a homework task).
-                // This prevents the undo button showing if the homework has already been re-entered.
-
                 if (isDeletedFromSchedule || isDeferredInSchedule) {
-                     // If it's a homework task and its input is now filled, hide the undo button
-                    if (taskId.startsWith('hw-') && homeworkInputValue !== '') {
+                    // If it's a homework task and its input is now filled, hide the undo button.
+                    // This covers the case where a user re-enters homework into the calendar,
+                    // making the undo button unnecessary.
+                    if (homeworkInputValue !== '') { // Simplified check, already confirmed it's 'hw' and for tomorrow
                         button.classList.add('hidden');
                         button.dataset.action = '';
                         button.title = '';
                         // console.log(`updateCalendarTaskIndicators: Hiding undo for ${taskId} (was deleted/deferred, but input is now filled).`);
                     } else {
+                        // Show the button and set its action/title
                         button.classList.remove('hidden');
                         if (isDeletedFromSchedule) {
                             button.dataset.action = 'undelete';
@@ -1629,8 +1640,9 @@
                         }
                     }
                 } else {
+                    // If not deleted and not deferred, then hide it.
                     button.classList.add('hidden');
-                    button.dataset.action = ''; // Clear action
+                    button.dataset.action = '';
                     button.title = '';
                     // console.log(`updateCalendarTaskIndicators: Hiding undo for ${taskId} (not deleted/deferred from schedule).`);
                 }
